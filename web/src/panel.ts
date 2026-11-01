@@ -8,24 +8,18 @@
 import type { NumericParamKey, PresetKey, RenderParams } from './params';
 import { PRESETS, PRESET_KEYS } from './params';
 import type { ViewerStats } from './viewer';
-import type { OutputSizeKey } from './capture';
 
-/** 导出的三种动作 */
-export type ExportAction = 'record' | 'frames' | 'seam';
+/** PNG 导出的尺寸选项（只出图片，不做 GIF/视频） */
+export type PngSizeKey = 'viewport' | 'square' | '1080p';
 
 export interface ExportRequest {
-  action: ExportAction;
-  seconds: number;
-  sizeKey: OutputSizeKey;
+  sizeKey: PngSizeKey;
 }
 
-/** 时长选项（秒）：30fps × 秒数都能被 3 整除，沸腾相位才能在循环点回绕 */
-const DURATIONS = [4, 6, 10] as const;
-const DEFAULT_DURATION = 6;
-const SIZE_OPTIONS: ReadonlyArray<{ key: OutputSizeKey; label: string }> = [
+const PNG_SIZE_OPTIONS: ReadonlyArray<{ key: PngSizeKey; label: string }> = [
+  { key: 'viewport', label: '当前视口' },
   { key: 'square', label: '1080×1080 方图' },
   { key: '1080p', label: '1920×1080' },
-  { key: 'viewport', label: '当前视口' },
 ];
 
 interface SliderDef {
@@ -78,14 +72,7 @@ const SLIDERS: readonly SliderDef[] = [
 
 /** 枚举参数（模式 / 墨量来源 / 主体极性）：下拉框比滑块直观得多 */
 const SELECTS: readonly SelectDef[] = [
-  {
-    key: 'renderMode',
-    label: '渲染模式',
-    options: [
-      { value: 'image', label: '图像模式（保真·线稿）' },
-      { value: 'cloud', label: '点云模式（立体·视差）' },
-    ],
-  },
+
   {
     key: 'inkSource',
     label: '墨量来源',
@@ -132,10 +119,8 @@ export class Panel {
   private lastStats: ViewerStats | null = null;
   /** 当前预设（导出文件名要用） */
   private preset: PresetKey;
-  /** 导出区控件 */
-  private durationSelect: HTMLSelectElement | null = null;
+  /** 输出区控件（PNG 导出） */
   private sizeSelect: HTMLSelectElement | null = null;
-  private exportButtons: HTMLButtonElement[] = [];
   private statusElement: HTMLElement | null = null;
   /** 输入区控件（file input 供自动化 / 重复选择用） */
   uploadInput: HTMLInputElement | null = null;
@@ -184,7 +169,7 @@ export class Panel {
     scrollArea.append(presets);
     this.setActivePreset(options.activePreset);
 
-    // ── 模式 / 墨量映射（第一层：要不要立体；第二层：这幅画该怎么读）──
+    // ── 墨量映射（第二层：这幅画该怎么读；两种模式共用）──
     for (const def of SELECTS) {
       scrollArea.append(this.buildSelect(def));
     }
@@ -204,21 +189,43 @@ export class Panel {
     scrollArea.append(this.buildToggle('boil', '沸腾线（每 2~3 帧换相位）'));
     scrollArea.append(this.buildToggle('autoSway', '自动运动（往返）'));
     scrollArea.append(this.buildToggle('parallaxMode', '视差平移（不旋转，平板不变形）'));
+
+    // ── 背景色（两列）──
+    const colorGrid = document.createElement('div');
+    colorGrid.className = 'grid2';
+    colorGrid.append(this.buildColor('paper', '背景 / 纸色'), this.buildColor('ink', '墨色'));
+    scrollArea.append(colorGrid);
+
+    // ── 调试 / 对照（非产品路径）────────────────────────────────────────────
+    // 产品路径固定是「点云模式」。图像模式是拿原图直接做风格化的对照组，
+    // 用来判断"点云渲染差在哪"，不参与产品流程（用户明确：所有渲染都是针对生成的点云）。
+    const debugGroup = document.createElement('details');
+    debugGroup.className = 'debug';
+    const debugSummary = document.createElement('summary');
+    debugSummary.textContent = '调试 / 对照（非产品路径）';
+    debugGroup.append(debugSummary);
+    debugGroup.append(
+      this.buildSelect({
+        key: 'renderMode',
+        label: '渲染模式',
+        options: [
+          { value: 'cloud', label: '点云模式（产品路径）' },
+          { value: 'image', label: '图像模式（对照：直接用原图）' },
+        ],
+      }),
+    );
     const threeQuarterRow = this.buildToggle('threeQuarterView', '3/4 基准视角（仅调试 fixture）');
     this.syncers.push(() => {
       threeQuarterRow.hidden = this.params.renderMode !== 'cloud';
     });
-    scrollArea.append(threeQuarterRow);
-
-    // ── 背景色 ──
-    scrollArea.append(this.buildColor('paper', '背景 / 纸色'));
-    scrollArea.append(this.buildColor('ink', '墨色'));
+    debugGroup.append(threeQuarterRow);
+    scrollArea.append(debugGroup);
 
     panel.append(scrollArea);
     panel.append(document.createElement('hr'));
 
-    // ── 导出（A 阶段：WebM 循环录制 + 帧序列 + 无缝自检）──
-    panel.append(this.buildExportSection());
+    // ── 输出：只导出 PNG ──
+    panel.append(this.buildOutputSection());
 
     this.sync();
     this.renderHud();
@@ -425,39 +432,17 @@ export class Panel {
     }
   }
 
-  // ── 导出区 ──────────────────────────────────────────────────────────────
-  private buildExportSection(): HTMLElement {
+  // ── 输出区：只导出 PNG（不做 GIF/视频）──────────────────────────────────
+  private buildOutputSection(): HTMLElement {
     const section = document.createElement('div');
     section.className = 'export';
 
-    const heading = document.createElement('div');
-    heading.className = 'export-title';
-    heading.textContent = '循环动图导出';
-    section.append(heading);
-
-    // 时长
-    const durationRow = document.createElement('div');
-    durationRow.className = 'row select';
-    const durationLabel = document.createElement('span');
-    durationLabel.textContent = '时长';
-    const durationSelect = document.createElement('select');
-    for (const seconds of DURATIONS) {
-      const option = document.createElement('option');
-      option.value = String(seconds);
-      option.textContent = `${seconds}s（${seconds * 30} 帧 @30fps）`;
-      if (seconds === DEFAULT_DURATION) option.selected = true;
-      durationSelect.append(option);
-    }
-    durationRow.append(durationLabel, durationSelect);
-    section.append(durationRow);
-
-    // 尺寸
     const sizeRow = document.createElement('div');
     sizeRow.className = 'row select';
     const sizeLabel = document.createElement('span');
-    sizeLabel.textContent = '尺寸';
+    sizeLabel.textContent = '导出尺寸';
     const sizeSelect = document.createElement('select');
-    for (const option of SIZE_OPTIONS) {
+    for (const option of PNG_SIZE_OPTIONS) {
       const element = document.createElement('option');
       element.value = option.key;
       element.textContent = option.label;
@@ -465,33 +450,18 @@ export class Panel {
     }
     sizeRow.append(sizeLabel, sizeSelect);
     section.append(sizeRow);
-
-    this.durationSelect = durationSelect;
     this.sizeSelect = sizeSelect;
 
-    // 按钮
     const buttons = document.createElement('div');
     buttons.className = 'export-buttons';
-    const specs: Array<{ action: ExportAction; label: string; hint: string }> = [
-      { action: 'record', label: '录制 WebM', hint: '录一个完整循环（可循环播放）' },
-      { action: 'frames', label: '导出帧序列', hint: '逐帧 PNG，给 Go 侧 image/gif 编码' },
-      { action: 'seam', label: '无缝自检', hint: '比较 index 0 与 index N 是否逐像素相同' },
-    ];
-    for (const spec of specs) {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.textContent = spec.label;
-      button.title = spec.hint;
-      button.addEventListener('click', () => {
-        this.onExport({
-          action: spec.action,
-          seconds: Number(durationSelect.value),
-          sizeKey: sizeSelect.value as OutputSizeKey,
-        });
-      });
-      this.exportButtons.push(button);
-      buttons.append(button);
-    }
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = '导出 PNG';
+    button.title = '把当前画面导出成 PNG（文件名带预设与关键参数）';
+    button.addEventListener('click', () => {
+      this.onExport({ sizeKey: sizeSelect.value as PngSizeKey });
+    });
+    buttons.append(button);
     section.append(buttons);
 
     const status = document.createElement('div');
@@ -514,15 +484,12 @@ export class Panel {
     return this.preset;
   }
 
-  /** 导出参数（尺寸/时长），给自动化脚本读 */
-  get exportSelection(): { seconds: number; sizeKey: OutputSizeKey } {
-    return {
-      seconds: Number(this.durationSelect?.value ?? DEFAULT_DURATION),
-      sizeKey: (this.sizeSelect?.value ?? 'square') as OutputSizeKey,
-    };
+  /** 导出尺寸选项，给自动化脚本读 */
+  get exportSizeKey(): PngSizeKey {
+    return (this.sizeSelect?.value ?? 'viewport') as PngSizeKey;
   }
 
-  /** 导出中：禁用所有控件，防止录到一半参数被改 */
+  /** 导出中：禁用所有控件，防止导到一半参数被改 */
   setExportBusy(busy: boolean): void {
     this.container.classList.toggle('busy', busy);
     const controls = this.container.querySelectorAll<
@@ -536,7 +503,6 @@ export class Panel {
   setExportStatus(text: string): void {
     if (this.statusElement) this.statusElement.textContent = text;
   }
-
   private setActivePreset(key: PresetKey): void {
     this.preset = key;
     for (const [presetKey, button] of this.presetButtons) {

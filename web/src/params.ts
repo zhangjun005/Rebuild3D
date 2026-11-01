@@ -147,7 +147,7 @@ const DEFAULTS = {
   threeQuarterView: false,
   parallaxMode: true,
   parallaxAmount: 4,
-  renderMode: 'cloud',
+  renderMode: 'cloud', // 产品路径 = 点云；图像模式只做对照
   inkSource: 1,
   inkPolarity: 0,
   inkGain: 8,

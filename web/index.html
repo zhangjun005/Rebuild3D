@@ -168,7 +168,7 @@
       hr {
         border: none;
         border-top: 1px solid rgba(255, 255, 255, 0.09);
-        margin: 8px 0;
+        margin: 4px 0;
       }
       #hud {
         position: fixed;
@@ -242,6 +242,8 @@
         cursor: default;
       }
       .export-status {
+        max-height: 30px;
+        overflow: hidden;
         min-height: 15px;
         font-size: 10.5px;
         line-height: 1.5;
@@ -252,14 +254,7 @@
         opacity: 0.8;
       }
 
-      /* 录制时把画布按输出比例居中显示（画布内容才是被录下来的东西） */
-      body.capturing #view {
-        inset: auto;
-        left: 50%;
-        top: 50%;
-        transform: translate(-50%, -50%);
-        box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12);
-      }
+
       /* ── 输入区（真实插画上传）── */
       .input-section {
         margin-bottom: 4px;
@@ -270,6 +265,19 @@
         line-height: 1.5;
         color: var(--ui-dim);
         white-space: pre-wrap;
+      }
+      .debug {
+        margin-top: 6px;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        padding-top: 4px;
+      }
+      .debug summary {
+        cursor: pointer;
+        font-size: 10px;
+        letter-spacing: 0.04em;
+        color: var(--ui-dim);
+        text-transform: uppercase;
+        margin-bottom: 4px;
       }
       .drop-overlay {
         position: fixed;

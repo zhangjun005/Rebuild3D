@@ -134,60 +134,6 @@ export interface ViewerStats {
   coreRadius: number;
   /** 当前点大小（CSS px @ 参考深度） */
   pointSize: number;
-  /** 是否正在录制/出帧 */
-  capturing: boolean;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 录制 / 出帧：固定 30fps 的确定性时钟
-//
-// 关键：**不走真实时间**。捕获时一切随时间变化的状态都由「帧索引 i」直接算出来：
-//   摆动相位 θ(i) = 2π · swings · (i mod N) / N
-//   方位角   azimuth(i)   = baseAzimuth + A · sin(θ(i))
-//   俯仰角   elevation(i) = baseElevation + A·PITCH_RATIO · sin(θ(i))
-//   沸腾相位 phase(i)     = floor((i mod N) / framesPerPhase) mod phases
-// 于是状态是 i 的纯函数，且 i = N 与 i = 0 逐位相同（因为先取模），
-// 这就是无缝循环的形式化保证（对齐算式见 README / 报告）。
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** 捕获的固定输出帧率：不跟显示器刷新率走（144Hz 屏上录出来也是稳定的 30fps） */
-export const CAPTURE_FPS = 30;
-
-export interface CaptureSpec {
-  /** 总帧数 = 秒数 × CAPTURE_FPS */
-  totalFrames: number;
-  /** 循环里摆动几个完整来回（整数，默认 1）。1 = 一个来回到位 */
-  swings?: number;
-  /** 沸腾重绘频率（Hz，默认 10 = §9 推荐的 8~12） */
-  boilFps?: number;
-}
-
-export interface CapturePlan {
-  totalFrames: number;
-  /** 一个循环里摆动几个来回 */
-  swings: number;
-  /** 运动模式快照：true = 视差平移，false = 旋转摆动 */
-  parallaxMode: boolean;
-  /** 视差幅度（场景宽度百分比）——parallaxMode 时有效 */
-  parallaxPercent: number;
-  /** 旋转摆动幅度（度）——!parallaxMode 时有效 */
-  swayAmplitudeDeg: number;
-  framesPerPhase: number;
-  phases: number;
-  /** 实际沸腾重绘频率 */
-  boilHz: number;
-  /** 循环时长（秒） */
-  seconds: number;
-}
-
-interface CaptureState extends CapturePlan {
-  distance: number;
-  /** 视差幅度的世界尺寸 = 场景宽度 × percent% */
-  parallaxWorld: number;
-  target: THREE.Vector3;
-  savedPosition: THREE.Vector3;
-  savedTarget: THREE.Vector3;
-  savedQuaternion: THREE.Quaternion;
 }
 
 type NumericUniform = THREE.IUniform<number>;
@@ -390,12 +336,10 @@ export class Viewer {
   private boilPhase = 0;
   private disposed = false;
 
-  /** 画布（录制 / 出帧要用） */
+  /** 画布（导出 PNG 用） */
   readonly canvas: HTMLCanvasElement;
-  /** 录制/出帧的确定性时钟状态（非空 = 正在捕获） */
-  private capture: CaptureState | null = null;
-  /** 输出尺寸覆盖（null = 跟窗口走） */
-  private outputSize: { width: number; height: number } | null = null;
+  /** 导出时的临时尺寸覆盖（null = 跟窗口走；只在 exportPng 期间非空） */
+  private exportSize: { width: number; height: number } | null = null;
 
   // ── 取景基准位姿（摆动与限位都围绕它）──
   /** 取景基准方位角（rad） */
@@ -1004,7 +948,7 @@ export class Viewer {
     this.imagePrintUniforms.uMeanLuminance.value = meanLuminance;
     const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
     this.updateImageScale(size.x / Math.max(size.y, 1));
-    if (!this.capture) this.renderFrame();
+    this.renderFrame();
   }
 
   /** 图像模式下是否可用（有图 + 模式是 image） */
@@ -1111,7 +1055,7 @@ export class Viewer {
       distance,
     );
     this.controls.update();
-    if (!this.capture) this.renderFrame();
+    this.renderFrame();
   }
 
   /**
@@ -1125,7 +1069,7 @@ export class Viewer {
     }
     const world = (percent / 100) * this.sceneWidth;
     this.poseParallax(world, 0.5 * world);
-    if (!this.capture) this.renderFrame();
+    this.renderFrame();
   }
 
   /** 当前视差横移量（场景宽度百分比） */
@@ -1310,7 +1254,7 @@ export class Viewer {
   private readonly resize = (): void => {
     if (this.disposed) return;
     // 录制时用输出尺寸覆盖窗口尺寸，pixelRatio 固定 1 → 绘图缓冲就是目标像素数
-    const override = this.outputSize;
+    const override = this.exportSize;
     const width = override?.width ?? window.innerWidth;
     const height = override?.height ?? window.innerHeight;
     const dpr = override ? 1 : Math.min(window.devicePixelRatio || 1, 2);
@@ -1396,15 +1340,8 @@ export class Viewer {
     const dt = this.lastTickAt === 0 ? 1 / 60 : Math.min((now - this.lastTickAt) / 1000, 0.1);
     this.lastTickAt = now;
 
-    // 捕获时：主循环只负责统计（保持 144Hz 的 rAF 心跳），
-    // 画面由 capture.ts 的录制循环按 30fps 时间片渲染确定性帧。
-    if (this.capture) {
-      this.updateFps();
-      return;
-    }
-
     // L3 沸腾：相位由「按 60fps 折算的逻辑帧计 % 循环长度」决定。
-    // 这样做同时满足两件事：① 换 144Hz 屏幕也是 10 Hz 重绘；② 时间可回绕（§9「GIF 循环跳帧」）。
+    // 这样换 144Hz 屏幕也是 10 Hz 重绘（§9 推荐 8~12 fps 的「重画」感）。
     this.boilClock = (this.boilClock + dt * 60) % BOIL_CYCLE_FRAMES;
     this.updateBoil();
 
@@ -1497,168 +1434,31 @@ export class Viewer {
     this.imagePrintUniforms.uBoilFlicker.value = r1;
   }
 
-  // ── 录制 / 出帧 ────────────────────────────────────────────────────────
-  get isCapturing(): boolean {
-    return this.capture !== null;
-  }
-
-  /** 当前输出帧尺寸（录制时是 setOutputSize 的目标，否则是窗口尺寸） */
-  captureSize(): { width: number; height: number } {
-    const size = this.outputSize;
-    return size
-      ? { width: size.width, height: size.height }
-      : { width: window.innerWidth, height: window.innerHeight };
-  }
-
+  // ── 导出 PNG ────────────────────────────────────────────────────────────
   /**
-   * 开始捕获：冻结交互、切到「帧索引驱动」的确定性时钟。
-   * 返回对齐后的计划（实际沸腾频率可能因整除被微调）。
+   * 把当前画面导出成 PNG。
+   *
+   * 只输出图片（不做 GIF/视频）。`size` 非空时临时切到目标尺寸渲染一帧
+   * （pixelRatio 强制 1，所以绘图缓冲就是目标像素数），导完立刻恢复视口尺寸。
+   * toBlob 在同一个同步任务里紧跟 renderFrame 调用，paint buffer 还没被清掉。
    */
-  beginCapture(spec: CaptureSpec): CapturePlan {
-    if (this.capture) throw new Error('已经处在捕获状态');
-
-    const total = Math.max(1, Math.round(spec.totalFrames));
-    const swings = Math.max(1, Math.round(spec.swings ?? 1));
-    const boilFps = Math.max(1, spec.boilFps ?? 10);
-
-    // 沸腾每相几帧：从 30/boilFps 往小取，直到能整除总帧数（保证相位在 N 处回绕到 0）
-    let framesPerPhase = Math.max(1, Math.round(CAPTURE_FPS / boilFps));
-    while (framesPerPhase > 1 && total % framesPerPhase !== 0) framesPerPhase -= 1;
-    if (total % framesPerPhase !== 0) framesPerPhase = 1; // 兜底：一帧一相
-    const phases = total / framesPerPhase;
-    const swayAmplitudeDeg = THREE.MathUtils.clamp(this.params.swayAmplitude, 0, SWAY_MAX_DEG);
-    const parallaxMode = this.params.parallaxMode;
-    const parallaxPercent = THREE.MathUtils.clamp(
-      this.params.parallaxAmount,
-      0,
-      PARALLAX_MAX_PERCENT,
-    );
-
-    const target = this.controls.target.clone();
-    const distance = Math.max(this.camera.position.distanceTo(target), 1e-6);
-
-    this.capture = {
-      totalFrames: total,
-      swings,
-      parallaxMode,
-      parallaxPercent,
-      swayAmplitudeDeg,
-      framesPerPhase,
-      phases,
-      boilHz: CAPTURE_FPS / framesPerPhase,
-      seconds: total / CAPTURE_FPS,
-      distance,
-      parallaxWorld: (parallaxPercent / 100) * this.sceneWidth,
-      target,
-      savedPosition: this.camera.position.clone(),
-      savedTarget: target.clone(),
-      savedQuaternion: this.camera.quaternion.clone(),
-    };
-
-    this.controls.enabled = false;
-    return {
-      totalFrames: total,
-      swings,
-      parallaxMode,
-      parallaxPercent,
-      swayAmplitudeDeg,
-      framesPerPhase,
-      phases,
-      boilHz: this.capture.boilHz,
-      seconds: this.capture.seconds,
-    };
-  }
-
-  /**
-   * 渲染捕获序列里的第 index 帧。
-   * index == totalFrames 时得到的就是「回绕帧」——与 index 0 逐位相同（自检用）。
-   */
-  renderCaptureFrame(index: number): void {
-    const capture = this.capture;
-    if (!capture) throw new Error('未开始捕获');
-
-    const wrapped = ((index % capture.totalFrames) + capture.totalFrames) % capture.totalFrames;
-
-    // 运动相位：θ 走完整周期；sin 在 T 处回到起点（state(N) ≡ state(0)）
-    const phaseAngle = Math.PI * 2 * capture.swings * (wrapped / capture.totalFrames);
-    const sway = Math.sin(phaseAngle);
-
-    if (capture.parallaxMode) {
-      // 视差平移：dx = A·sinθ，dy = 0.5A·sinθ；**朝向不变**（poseParallax 不改四元数）
-      this.poseParallax(capture.parallaxWorld * sway, 0.5 * capture.parallaxWorld * sway);
-    } else {
-      const amplitude = THREE.MathUtils.degToRad(capture.swayAmplitudeDeg);
-      this.poseFromOffsets(amplitude * sway, amplitude * SWAY_PITCH_RATIO * sway, capture.distance);
-    }
-
-    const phase = Math.floor(wrapped / capture.framesPerPhase) % capture.phases;
-    this.applyBoilPhase(phase);
-
-    this.renderFrame();
-  }
-
-  /** 结束捕获：恢复相机与交互 */
-  endCapture(): void {
-    const capture = this.capture;
-    if (!capture) return;
-    this.capture = null;
-    this.camera.position.copy(capture.savedPosition);
-    this.camera.quaternion.copy(capture.savedQuaternion);
-    this.controls.target.copy(capture.savedTarget);
-    this.controls.enabled = true;
-    this.lastTickAt = 0;
-    this.applyParams();
-    this.controls.update();
-    this.syncParallaxBaseFromCamera();
-    this.renderFrame();
-  }
-
-  /**
-   * 设置输出尺寸（null = 跟窗口走）。
-   * 录制 1080p / 1080×1080 时用：pixelRatio 强制 1，绘图缓冲就是目标像素数。
-   */
-  setOutputSize(size: { width: number; height: number } | null): void {
-    this.outputSize = size;
-    if (size) {
-      document.body.classList.add('capturing');
-      const scale = Math.min(window.innerWidth / size.width, window.innerHeight / size.height);
-      this.canvas.style.width = `${Math.max(1, Math.round(size.width * scale))}px`;
-      this.canvas.style.height = `${Math.max(1, Math.round(size.height * scale))}px`;
-    } else {
-      document.body.classList.remove('capturing');
-      this.canvas.style.width = '';
-      this.canvas.style.height = '';
-    }
+  async exportPng(size: { width: number; height: number } | null): Promise<Blob> {
+    const restore = this.exportSize;
+    this.exportSize = size;
     this.resize();
+    this.renderFrame();
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      this.canvas.toBlob((value) => {
+        if (value) resolve(value);
+        else reject(new Error('canvas.toBlob 返回空'));
+      }, 'image/png');
+    });
+    this.exportSize = restore;
+    this.resize();
+    this.lastTickAt = 0;
+    this.renderFrame();
+    return blob;
   }
-
-  /** 捕获计划信息（未在捕获时返回 null） */
-  get capturePlan(): CapturePlan | null {
-    if (!this.capture) return null;
-    const {
-      totalFrames,
-      swings,
-      parallaxMode,
-      parallaxPercent,
-      swayAmplitudeDeg,
-      framesPerPhase,
-      phases,
-      boilHz,
-      seconds,
-    } = this.capture;
-    return {
-      totalFrames,
-      swings,
-      parallaxMode,
-      parallaxPercent,
-      swayAmplitudeDeg,
-      framesPerPhase,
-      phases,
-      boilHz,
-      seconds,
-    };
-  }
-
   private renderFrame(): void {
     const colorTarget = this.colorTarget;
     const depthTarget = this.depthTarget;
@@ -1754,7 +1554,6 @@ export class Viewer {
       cameraDistance: this.frameInfo?.distance ?? 0,
       coreRadius: this.frameInfo?.radius ?? 0,
       pointSize: this.params.pointSize,
-      capturing: this.capture !== null,
     };
   }
 
@@ -1789,7 +1588,7 @@ export class Viewer {
   }
 }
 
-/** 自动化/调试入口：Playwright 里读 window.illust3d.stats() */
+/** 自动化/调试入口：Playwright / scripts/shot.cjs 里读 window.illust3d.stats() */
 export interface Illust3dDebug {
   viewer: Viewer;
   stats: () => ViewerStats;
@@ -1797,25 +1596,8 @@ export interface Illust3dDebug {
   syncPanel?: () => void;
   /** 换一份 ILC1 点云（真实深度点云 / 自动化测试用），返回点数 */
   loadILC1?: (buffer: ArrayBuffer, label?: string) => number;
-  /** A 阶段约定：逐帧导出 PNG blob（GIF 由 Go 侧 image/gif 编码） */
-  captureFrames?: (
-    count: number,
-    options?: {
-      swings?: number;
-      size?: { width: number; height: number };
-      includeWrapFrame?: boolean;
-    },
-  ) => Promise<Blob[]>;
-  /** 录一个完整循环的 WebM */
-  recordWebM?: (
-    seconds: number,
-    sizeKey?: 'viewport' | '1080p' | 'square',
-  ) => Promise<{ blob: Blob; plan: CapturePlan; mimeType: string }>;
-  /** 无缝自检：index 0 与 index N 是否逐像素相同 */
-  verifySeam?: (
-    seconds: number,
-    sizeKey?: 'viewport' | '1080p' | 'square',
-  ) => Promise<{ identical: boolean; hashFirst: string; hashWrap: string; plan: CapturePlan }>;
+  /** 导出 PNG（size = null 表示当前视口） */
+  exportPng?: (size: { width: number; height: number } | null) => Promise<Blob>;
 }
 
 declare global {
