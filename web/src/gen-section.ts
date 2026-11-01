@@ -92,17 +92,6 @@ export class GenSection {
       }
     });
 
-    // 边缘阈值
-    root.append(
-      this.slider('边缘阈值', 'edgeThresh', {
-        min: 0,
-        max: 1,
-        step: 0.01,
-        digits: 2,
-        hint: '0 = 自动（按深度差 p99）；调大 = 更少剔除边缘点',
-      }),
-    );
-
     // 高级
     const advanced = document.createElement('details');
     advanced.className = 'debug';

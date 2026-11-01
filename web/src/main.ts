@@ -296,8 +296,6 @@ async function boot(): Promise<void> {
   }
 
   // ── 点云模式（产品路径）：POST /api/infer → ILC1 → 渲染 ─────────────────────
-  /** 点云模式的采样上限：最终配方 400,000（点云是产品路径，别再给 20 万） */
-  const CLOUD_MAX_POINTS = 400000;
   /** 最近一次点云生成结果（模式来回切换时用来重建状态栏） */
   let lastCloudMetrics: { pointCount: number; depthWidth: number; depthHeight: number; inferMs: number; geometryMs: number; totalMs: number; bytes: number } | null = null;
   let lastMode: 'cloud' | 'image' = viewer.params.renderMode;
@@ -316,7 +314,7 @@ async function boot(): Promise<void> {
 
 
   /** 统一把「生成参数」塞进推理请求 */
-  function genInferOptions(file: File, phaseText: string): Parameters<typeof inferIllustration>[1] {
+  function genInferOptions(file: File): Parameters<typeof inferIllustration>[1] {
     void file;
     return {
       focalFactor: genParams.focalFactor,
@@ -324,7 +322,7 @@ async function boot(): Promise<void> {
       edgeThresh: genParams.edgeThresh,
       sampleMode: genParams.sampleMode,
       workRes: genParams.workRes,
-      onPhase: (phase) => panel.setInputStatus(`${phaseText}（${phase}）`),
+      onPhase: (phase) => panel.setInputStatus(phase),
     };
   }
 
@@ -349,7 +347,7 @@ async function boot(): Promise<void> {
       panel.setInputStatus(
         `重新推理中…（焦距 ${genParams.focalFactor.toFixed(2)} · 最多 ${genParams.maxPoints.toLocaleString('en-US')} 点）`,
       );
-      const result = await inferIllustration(file, genInferOptions(file, '重新推理中…'));
+      const result = await inferIllustration(file, genInferOptions(file));
       panel.setInputStatus(`生成点云…（${result.metrics.pointCount.toLocaleString('en-US')} 点）`);
       viewer.setCloud(result.cloud, `${file.name} · ${result.metrics.pointCount.toLocaleString('en-US')} 点`, {
         preserveOrientation: true,
@@ -407,12 +405,9 @@ async function boot(): Promise<void> {
       }
 
       panel.setInputStatus(
-        `推理中…（深度 → 点云，最多 ${CLOUD_MAX_POINTS.toLocaleString('en-US')} 点，首次可能要 1~3s）`,
+        `推理中…（深度 → 点云，最多 ${genParams.maxPoints.toLocaleString('en-US')} 点，首次可能要 1~3s）`,
       );
-      const result = await inferIllustration(file, {
-        maxPoints: CLOUD_MAX_POINTS,
-        onPhase: (phase) => panel.setInputStatus(phase),
-      });
+      const result = await inferIllustration(file, genInferOptions(file));
       panel.setInputStatus(`生成点云…（${result.metrics.pointCount.toLocaleString('en-US')} 点）`);
       applyCloud(result.cloud, `${file.name} · ${result.metrics.pointCount.toLocaleString('en-US')} 点`);
       cloudForFile = file;

@@ -386,7 +386,9 @@ export interface GenParams {
 
 export const GEN_DEFAULTS: GenParams = {
   focalFactor: 1,
-  maxPoints: 400000,
+  // 默认 100 万：与 200 万同为 144fps（瓶颈在传输不在渲染），端到端只多 0.4s，
+  // 细节明显好于 40 万。Go 侧 DefaultMaxPoints 保持 40 万（纯 API 兜底），web 显式传值。
+  maxPoints: 1000000,
   edgeThresh: 0,
   sampleMode: 'structure',
   workRes: 0,
