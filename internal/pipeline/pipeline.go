@@ -45,18 +45,25 @@ const (
 	MinMaxPoints = 1000
 	// MaxMaxPoints 是允许的最大点数上限（浏览器侧的硬上限）。
 	MaxMaxPoints = 5_000_000
-	// DefaultEdgeWeight 是结构模式的默认边缘权重 k（w = 1 + k*Gn）。
+	// DefaultEdgeWeight 是结构模式的默认边缘权重 kEdge（w = 1 + kEdge*Gn + kInk*Ink）。
+	// 注意：pipeline 库层把 0 当作**显式关闭**该通道；默认值由 HTTP API 层填。
 	DefaultEdgeWeight = 6.0
-	// MaxEdgeWeight 是 k 的上限，防止权重无限放大导致其它区域没点。
+	// DefaultInkWeight 是结构模式的默认墨量权重 kInk（相对暗度通道）。
+	DefaultInkWeight = 4.0
+	// MaxEdgeWeight / MaxInkWeight 是权重上限，防止权重无限放大导致其它区域没点。
 	MaxEdgeWeight = 64.0
+	MaxInkWeight  = 64.0
 	// autoEdgePercentile 是自动边缘阈值取的分位数：相邻深度差超过 p99 的判为遮挡边界。
 	autoEdgePercentile = 0.99
 
-	// WorkResPointFactor 决定结构模式的工作分辨率：长边 ≈ sqrt(max_points*3)。
-	WorkResPointFactor = 3
-	// MinWorkRes / MaxWorkRes 夹住工作分辨率长边（避免太小没细节、太大费时）。
-	MinWorkRes = 256
-	MaxWorkRes = 2048
+	// 结构模式的**工作分辨率**（长边像素）与 max_points 解耦：
+	//   - 自动（WorkRes=0）：clamp(round(原图长边/2), AutoWorkResMin, AutoWorkResMax)
+	//   - 显式：clamp 到 [MinWorkRes, MaxWorkRes]
+	// workRes 决定"线稿最细能到多少"（由原图细节决定），max_points 只决定保留多少个点。
+	AutoWorkResMin = 512
+	AutoWorkResMax = 2048
+	MinWorkRes     = 256
+	MaxWorkRes     = 4096
 	// EdgeRatioThreshold 是判定"强边缘点"的 Gn 阈值（edgePointRatio 指标用）。
 	EdgeRatioThreshold = 0.5
 )
@@ -85,9 +92,16 @@ type Params struct {
 	// SampleMode 是采样模式："depthpixel" 或 "structure"。
 	// 空值 = depthpixel（保持库层老行为；HTTP API 层默认 structure）。
 	SampleMode string
-	// EdgeWeight 是结构模式的边缘权重 k（w = 1 + k*Gn）。0 表示用默认 6。
-	// k 越大越偏向强边缘（最多 MaxEdgeWeight）。
+	// EdgeWeight 是结构模式的边缘权重 kEdge（w = 1 + kEdge*Gn + kInk*Ink）。
+	// 0 = 显式关闭边缘通道（库层不填默认值；HTTP API 默认 6）。
 	EdgeWeight float64
+	// InkWeight 是结构模式的墨量权重 kInk（相对暗度通道）。
+	// 0 = 显式关闭墨量通道（库层不填默认值；HTTP API 默认 4）。
+	InkWeight float64
+	// WorkRes 是结构采样的工作分辨率长边（像素）。0 = 自动
+	// （clamp(原图长边/2, 512, 2048)），显式值会被夹到 [256, 4096]。
+	// **与 MaxPoints 解耦**：它决定线稿最细能到多少，MaxPoints 只决定保留多少点。
+	WorkRes int
 }
 
 // Result 是一次点云生成的结果（附带回给前端的元数据）。
@@ -117,6 +131,13 @@ type Result struct {
 	WorkRes int
 	// EdgePointRatio 是落在强边缘（Gn > 0.5）上的点占比，用于对比两种模式。
 	EdgePointRatio float64
+	// DarkPointRatio 是落在原图暗像素（亮度 <= p20）上的点占比。
+	DarkPointRatio float64
+	// DarkPixelRatio 是原图里暗像素的占比（理论上≈0.20）。
+	DarkPixelRatio float64
+	// DarkEnrichment = DarkPointRatio / DarkPixelRatio：
+	// 纯均匀采样 = 1.0；结构/墨量采样应显著 > 1（"线稿有没有被点云承载"的核心指标）。
+	DarkEnrichment float64
 }
 
 // normalize 补默认值并做范围校验。
@@ -151,15 +172,25 @@ func (p Params) normalize() (Params, error) {
 			ErrInvalidParams, p.SampleMode, SampleModeDepthPixel, SampleModeStructure)
 	}
 	if p.SampleMode == SampleModeStructure {
-		if p.EdgeWeight == 0 {
-			p.EdgeWeight = DefaultEdgeWeight
-		}
+		// 0 = 显式关闭对应通道（默认值由 API 层给），负数/非有限 = 参数错。
 		if math.IsNaN(p.EdgeWeight) || math.IsInf(p.EdgeWeight, 0) || p.EdgeWeight < 0 {
 			return p, fmt.Errorf("%w: edge_weight=%v 必须 >= 0 的有限数", ErrInvalidParams, p.EdgeWeight)
 		}
 		if p.EdgeWeight > MaxEdgeWeight {
 			p.EdgeWeight = MaxEdgeWeight
 		}
+		if math.IsNaN(p.InkWeight) || math.IsInf(p.InkWeight, 0) || p.InkWeight < 0 {
+			return p, fmt.Errorf("%w: ink_weight=%v 必须 >= 0 的有限数", ErrInvalidParams, p.InkWeight)
+		}
+		if p.InkWeight > MaxInkWeight {
+			p.InkWeight = MaxInkWeight
+		}
+	}
+	if p.WorkRes < 0 {
+		return p, fmt.Errorf("%w: work_res=%d 必须 >= 0（0=自动）", ErrInvalidParams, p.WorkRes)
+	}
+	if p.WorkRes > MaxWorkRes {
+		p.WorkRes = MaxWorkRes
 	}
 	return p, nil
 }
@@ -249,12 +280,16 @@ func buildDepthPixel(depth []float32, w, h int, img image.Image, p Params, focal
 		return nil, ErrNoPoints
 	}
 
-	// 5) 与 structure 模式对照的指标：最终点里有多少落在原图强边缘上。
-	//    结构图按**深度分辨率**算，再把每个最终点反向投影回像素查 Gn。
+	// 5) 与 structure 模式对照的指标：
+	//    - 强边缘点占比（结构图按**深度分辨率**算，再把每个最终点反向投影回像素查 Gn）
+	//    - 暗像素富集（线稿是深色细线，这个指标更贴"点云有没有承载线稿"）
 	ratio := 0.0
+	dark := imageDarkStats(img)
+	darkPointRatio := 0.0
 	if len(kept) > 0 && focal > 0 {
 		gn := computeStructureMap(img, w, h)
 		ratio = edgeRatioByInverse(kept, w, h, focal, focal, gn)
+		darkPointRatio = darkRatioByInverse(kept, w, h, focal, focal, img, dark)
 	}
 
 	minB, maxB := bbox(kept)
@@ -278,6 +313,9 @@ func buildDepthPixel(depth []float32, w, h int, img image.Image, p Params, focal
 		SampleMode:     SampleModeDepthPixel,
 		WorkRes:        maxInt(w, h),
 		EdgePointRatio: ratio,
+		DarkPointRatio: darkPointRatio,
+		DarkPixelRatio: dark.darkPixelRatio,
+		DarkEnrichment: darkEnrichmentOf(darkPointRatio, dark.darkPixelRatio),
 	}, nil
 }
 

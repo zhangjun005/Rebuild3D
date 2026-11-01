@@ -27,14 +27,16 @@ import (
 //	image         必填，插画文件（标准库可解码的 png/jpeg/gif）
 //	focal_factor  艺术参数，默认 1.0：fx = fy = factor * max(depthW, depthH)
 //	sample_mode   采样模式，默认 structure：depthpixel = 逐深度像素；structure = 结构感知
-//	edge_weight   结构模式的边缘权重 k（w = 1 + k*Gn），默认 6
-//	max_points    点数上限，默认 200000
+//	edge_weight   结构模式的边缘权重 kEdge（w = 1 + kEdge*Gn + kInk*Ink），默认 6；0 = 关闭
+//	ink_weight    结构模式的墨量权重 kInk（相对暗度通道），默认 4；0 = 关闭
+//	work_res      结构采样工作分辨率长边，0 = 自动（原图长边/2，夹 512..2048）
+//	max_points    点数上限，默认 200000（与 work_res 解耦）
 //	voxel_size    体素边长，默认 0（structure 模式默认不做体素下采样）
 //	edge_thresh   边缘阈值，0 = 按深度分位数自动
 //
 // 响应：application/octet-stream（ILC1 字节），附 X-Ilc1-Pointcount / X-Depth-Width /
-// X-Depth-Height / X-Infer-Ms / X-Sample-Mode / X-Work-Res / X-Edge-Point-Ratio 等响应头。
-// 带 ?format=meta 时改为返回 JSON 元数据。
+// X-Depth-Height / X-Infer-Ms / X-Sample-Mode / X-Work-Res / X-Edge-Point-Ratio /
+// X-Dark-Enrichment 等响应头。带 ?format=meta 时改为返回 JSON 元数据。
 func (s *Server) handleInfer(w http.ResponseWriter, r *http.Request) {
 	totalStart := time.Now()
 	if s.sidecar == nil {
@@ -171,6 +173,7 @@ func (s *Server) handleInfer(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Sample-Mode", res.SampleMode)
 	w.Header().Set("X-Work-Res", strconv.Itoa(res.WorkRes))
 	w.Header().Set("X-Edge-Point-Ratio", strconv.FormatFloat(res.EdgePointRatio, 'f', 4, 64))
+	w.Header().Set("X-Dark-Enrichment", strconv.FormatFloat(res.DarkEnrichment, 'f', 4, 64))
 	w.Header().Set("Cache-Control", "no-store")
 	if _, err := w.Write(res.ILC1); err != nil {
 		return // 客户端提前断开，无需上报
@@ -212,6 +215,7 @@ func parseInferParams(form url.Values) (pipeline.Params, error) {
 		MaxPoints:   pipeline.DefaultMaxPoints,
 		SampleMode:  pipeline.SampleModeStructure,
 		EdgeWeight:  pipeline.DefaultEdgeWeight,
+		InkWeight:   pipeline.DefaultInkWeight,
 	}
 	if v := form.Get("focal_factor"); v != "" {
 		f, err := strconv.ParseFloat(v, 64)
@@ -260,7 +264,21 @@ func parseInferParams(form url.Values) (pipeline.Params, error) {
 		if err != nil || f < 0 || math.IsNaN(f) || math.IsInf(f, 0) {
 			return p, fmt.Errorf("edge_weight 必须是非负有限数: %q", v)
 		}
-		p.EdgeWeight = f
+		p.EdgeWeight = f // 0 = 显式关闭边缘通道
+	}
+	if v := form.Get("ink_weight"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f < 0 || math.IsNaN(f) || math.IsInf(f, 0) {
+			return p, fmt.Errorf("ink_weight 必须是非负有限数: %q", v)
+		}
+		p.InkWeight = f // 0 = 显式关闭墨量通道
+	}
+	if v := form.Get("work_res"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return p, fmt.Errorf("work_res 必须是非负整数（0=自动）: %q", v)
+		}
+		p.WorkRes = n
 	}
 	return p, nil
 }
@@ -295,20 +313,25 @@ type (
 		InferMs       float64   `json:"inferMs"`
 		GeometryMs    float64   `json:"geometryMs"`
 		TotalMs       float64   `json:"totalMs"`
-		// SampleMode / WorkRes / EdgePointRatio 是结构感知采样的关键指标：
-		// edgePointRatio = 落在原图强边缘（Gn>0.5）上的点占比，用于 A/B 对照。
+		// SampleMode / WorkRes / 权重 / 指标：结构感知采样的关键元数据。
+		// edgePointRatio = 落在原图强边缘（Gn>0.5）上的点占比；
+		// darkEnrichment = 落在暗像素（lum<p20）上的点占比 / 暗像素占比（1.0 = 均匀采样）。
 		SampleMode     string  `json:"sampleMode"`
 		WorkRes        int     `json:"workRes"`
 		EdgePointRatio float64 `json:"edgePointRatio"`
 		EdgeWeight     float64 `json:"edgeWeight"`
+		InkWeight      float64 `json:"inkWeight"`
+		DarkPointRatio float64 `json:"darkPointRatio"`
+		DarkPixelRatio float64 `json:"darkPixelRatio"`
+		DarkEnrichment float64 `json:"darkEnrichment"`
 	}
 )
 
 // newInferMeta 组装返回给前端的点云元数据。
 func newInferMeta(res *pipeline.Result, params pipeline.Params, processRes int, format string, imgBytes int, inferMs, geoMs, totalMs float64) inferMeta {
-	edgeWeight := params.EdgeWeight
+	edgeWeight, inkWeight := params.EdgeWeight, params.InkWeight
 	if res.SampleMode != pipeline.SampleModeStructure {
-		edgeWeight = 0 // depthpixel 模式不用 edge_weight，别误导前端
+		edgeWeight, inkWeight = 0, 0 // depthpixel 模式不用这些权重，别误导前端
 	}
 	return inferMeta{
 		PointCount: res.PointCount,
@@ -331,6 +354,10 @@ func newInferMeta(res *pipeline.Result, params pipeline.Params, processRes int, 
 		WorkRes:        res.WorkRes,
 		EdgePointRatio: res.EdgePointRatio,
 		EdgeWeight:     edgeWeight,
+		InkWeight:      inkWeight,
+		DarkPointRatio: res.DarkPointRatio,
+		DarkPixelRatio: res.DarkPixelRatio,
+		DarkEnrichment: res.DarkEnrichment,
 	}
 }
 

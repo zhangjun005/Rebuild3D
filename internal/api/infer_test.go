@@ -218,8 +218,8 @@ func TestInferStructureModeDefault(t *testing.T) {
 	s := inferServer(t, side, Options{Version: "v-test", ProcessRes: 504})
 	white := makePNG(t, 8, 6, color.RGBA{R: 255, G: 255, B: 255, A: 255})
 
-	// 先看 meta：4×3 深度、max_points=5000 → workRes 长边夹到 256（4:3 → 256×192，
-	// 候选 49152 > 5000，所以应精确取 5000 点）。
+	// 先看 meta：4×3 深度、原图 8×6 → 自动 workRes = clamp(round(8/2),512,2048)=512
+	// （4:3 → 512×384，候选 196608 > 5000，所以应精确取 5000 点）。
 	resp, body := postInfer(t, s.URL+"/api/infer?format=meta", white, map[string]string{
 		"max_points": "5000",
 	})
@@ -236,8 +236,8 @@ func TestInferStructureModeDefault(t *testing.T) {
 	if meta.PointCount != 5000 {
 		t.Errorf("pointCount = %d，期望精确 5000", meta.PointCount)
 	}
-	if meta.WorkRes != 256 {
-		t.Errorf("workRes = %d，期望 256（max_points=5000 时夹到下界）", meta.WorkRes)
+	if meta.WorkRes != 512 {
+		t.Errorf("workRes = %d，期望 512（自动值顶到下限）", meta.WorkRes)
 	}
 	if meta.VoxelSize != 0 {
 		t.Errorf("structure 模式默认不做体素下采样，voxelSize = %v", meta.VoxelSize)
@@ -245,8 +245,17 @@ func TestInferStructureModeDefault(t *testing.T) {
 	if meta.EdgeWeight != pipeline.DefaultEdgeWeight {
 		t.Errorf("edgeWeight = %v，期望默认 %v", meta.EdgeWeight, pipeline.DefaultEdgeWeight)
 	}
+	if meta.InkWeight != pipeline.DefaultInkWeight {
+		t.Errorf("inkWeight = %v，期望默认 %v", meta.InkWeight, pipeline.DefaultInkWeight)
+	}
 	if meta.EdgePointRatio < 0 || meta.EdgePointRatio > 1 {
 		t.Errorf("edgePointRatio = %v，应在 [0,1]", meta.EdgePointRatio)
+	}
+	if meta.DarkPixelRatio < 0 || meta.DarkPixelRatio > 1 {
+		t.Errorf("darkPixelRatio = %v，应在 [0,1]", meta.DarkPixelRatio)
+	}
+	if meta.DarkEnrichment < 0 {
+		t.Errorf("darkEnrichment = %v，应 >= 0", meta.DarkEnrichment)
 	}
 
 	// 再看二进制响应：响应头 + ILC1 长度必须与点数自洽。
@@ -257,17 +266,36 @@ func TestInferStructureModeDefault(t *testing.T) {
 	if got := resp2.Header.Get("X-Sample-Mode"); got != pipeline.SampleModeStructure {
 		t.Errorf("X-Sample-Mode = %q", got)
 	}
-	if got := resp2.Header.Get("X-Work-Res"); got != "256" {
-		t.Errorf("X-Work-Res = %q，期望 256", got)
+	if got := resp2.Header.Get("X-Work-Res"); got != "512" {
+		t.Errorf("X-Work-Res = %q，期望 512", got)
 	}
 	if got := resp2.Header.Get("X-Edge-Point-Ratio"); got == "" {
 		t.Error("缺少 X-Edge-Point-Ratio 响应头")
+	}
+	if got := resp2.Header.Get("X-Dark-Enrichment"); got == "" {
+		t.Error("缺少 X-Dark-Enrichment 响应头")
 	}
 	if len(bin) != 8+15*5000 {
 		t.Errorf("ILC1 字节数 = %d，期望 %d", len(bin), 8+15*5000)
 	}
 	if string(bin[0:4]) != "ILC1" {
 		t.Errorf("magic = %q", bin[0:4])
+	}
+
+	// 显式 work_res / 权重会被采纳并如实报告（A/B 用）。
+	_, abBody := postInfer(t, s.URL+"/api/infer?format=meta", white, map[string]string{
+		"max_points":  "5000",
+		"work_res":    "1024",
+		"edge_weight": "0",
+		"ink_weight":  "3",
+	})
+	var abMeta inferMeta
+	if err := json.Unmarshal(abBody, &abMeta); err != nil {
+		t.Fatalf("解析 A/B meta: %v", err)
+	}
+	if abMeta.WorkRes != 1024 || abMeta.EdgeWeight != 0 || abMeta.InkWeight != 3 {
+		t.Errorf("A/B meta = workRes:%d edgeWeight:%v inkWeight:%v，期望 1024/0/3",
+			abMeta.WorkRes, abMeta.EdgeWeight, abMeta.InkWeight)
 	}
 
 	// depthpixel 仍可回退，且 meta 如实报告。
@@ -361,6 +389,22 @@ func TestInferErrors(t *testing.T) {
 			side:       &stubSidecar{res: tinyDepth()},
 			wantStatus: http.StatusBadRequest,
 			wantSubstr: "edge_weight",
+		},
+		{
+			name:       "negative-ink-weight",
+			image:      validPNG,
+			fields:     map[string]string{"ink_weight": "-2"},
+			side:       &stubSidecar{res: tinyDepth()},
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "ink_weight",
+		},
+		{
+			name:       "negative-work-res",
+			image:      validPNG,
+			fields:     map[string]string{"work_res": "-1"},
+			side:       &stubSidecar{res: tinyDepth()},
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "work_res",
 		},
 		{
 			name:       "sidecar-remote-error",

@@ -18,58 +18,97 @@ const (
 	// structureTileMin / structureTileMax 夹住分块边长（像素）。
 	structureTileMin = 8
 	structureTileMax = 64
-	// graySamplesPerAxis：把原图缩到工作分辨率时每轴采几个点。
-	// 用 3×3 box 采样而不是最近邻：线稿只有 2~3px 宽，最近邻会整条漏掉。
+	// graySamplesPerAxis：把原图缩到工作分辨率时每轴最多采几个点。
+	// 用 box 采样而不是最近邻：线稿只有 2~3px 宽，最近邻会整条漏掉。
+	// 实际采样数按"每个工作像素覆盖的源像素数"自适应（见 grayGrid）。
 	graySamplesPerAxis = 3
 	// sobelHistBins：按 p99 归一化时直方图的精度。
 	sobelHistBins = 4096
+	// inkPercentileLow / High：相对暗度 Ink 的拉伸分位（p5 / p95）。
+	inkPercentileLow  = 0.05
+	inkPercentileHigh = 0.95
 )
 
 // buildStructure 是结构感知采样路径：
 //
-//	深度双线性上采样 → 原图 Sobel 结构图 → 权重 w=1+k*Gn → 分层抽样 max_points 个点
+//	深度上采样 → 原图结构图（Sobel 梯度 Gn + 相对暗度 Ink）
+//	→ 权重 w = 1 + kEdge*Gn + kInk*Ink → 确定性分层抽样 max_points 个点
 //
-// 不自动做体素下采样（会把刚加密到线稿上的点合并掉）；显式 voxel_size>0 时才做。
+// 工作分辨率由原图决定（work_res，0=自动=原图长边/2），与 max_points 解耦；
+// 默认不做体素下采样（会把刚加密到线稿上的点合并掉），显式 voxel_size>0 才做。
 func buildStructure(depth []float32, w, h int, img image.Image, p Params, focal float64, discard []bool, thresh float32) (*Result, error) {
-	gw, gh := workResFor(p.MaxPoints, w, h)
+	bounds := img.Bounds()
+	iw, ih := bounds.Dx(), bounds.Dy()
+	gw, gh := workResFor(p, iw, ih, w, h)
 
-	// 1) 深度上采样到工作分辨率：双线性，但不跨深度跳变插值（否则飞点被拉成丝）。
-	upDepth, upOK := upsampleDepth(depth, w, h, gw, gh, discard)
+	// 1) 候选掩码：工作像素的 2×2 深度邻域里至少有一个有效（且未被边缘剔除）的深度。
+	candOK := candidateDepthOK(depth, w, h, gw, gh, discard)
 
-	// 2) 原图结构图：灰度 → 3×3 高斯 → Sobel 幅值 → 按 p99 归一化到 [0,1]。
-	gn := computeStructureMap(img, gw, gh)
+	// 2) 原图结构权重：Sobel 梯度 Gn ∈ [0,1] + 相对暗度 Ink ∈ [0,1]。
+	gn, ink := structureWeights(img, gw, gh)
 
-	// 3) 确定性分层抽样：按权重分配每块预算，块内按权重从大到小选。
-	sel, candidateCount := selectStructured(gn, upOK, gw, gh, p.MaxPoints, p.EdgeWeight)
+	// 3) 确定性分层抽样。
+	sel, candidateCount := selectStructured(gn, ink, candOK, gw, gh, p.MaxPoints, p.EdgeWeight, p.InkWeight)
 	if len(sel) == 0 {
 		return nil, ErrNoPoints
 	}
 
-	// 4) 采样点：深度 = 上采样值，颜色 = 原图对应位置的原始像素（最近邻，不做平均）。
-	pts := make([]geometry.Vec3, len(sel))
-	cols := make([]geometry.Color, len(sel))
-	bounds := img.Bounds()
+	// 4) 采样点：深度 = 双线性上采样值，颜色 = 原图对应位置的原始像素。
+	boundsPx := makePixelAt(img)
 	worldPerPixelX := float64(w) / focal
 	worldPerPixelY := float64(h) / focal
+	dark := imageDarkStats(img)
+
+	pts := make([]geometry.Vec3, 0, len(sel))
+	cols := make([]geometry.Color, 0, len(sel))
 	edgeCount := 0
-	for j, si := range sel {
+	darkCount := 0
+	for _, si := range sel {
 		i := int(si)
 		wx := i % gw
 		wy := i / gw
-		d := upDepth[i]
+		d, ok := sampleDepthBilinear(depth, w, h, gw, gh, discard, wx, wy)
+		if !ok {
+			continue // 候选掩码保证不会发生，防御性跳过
+		}
 		// 与 UnprojectPerspective 等价（把焦距按工作分辨率缩放后代入，z = -d）：
 		//   x = ((wx+0.5)/gw - 0.5) * d * w/focal
 		//   y = (0.5 - (wy+0.5)/gh) * d * h/focal
 		//   z = -d        （d 是距离、越大越远；相机在 +Z 朝 -Z 看）
 		x := ((float64(wx)+0.5)/float64(gw) - 0.5) * float64(d) * worldPerPixelX
 		y := (0.5 - (float64(wy)+0.5)/float64(gh)) * float64(d) * worldPerPixelY
-		pts[j] = geometry.Vec3{X: float32(x), Y: float32(y), Z: float32(-float64(d))}
-		cols[j] = sampleColor(img, bounds, wx, wy, gw, gh)
+		pts = append(pts, geometry.Vec3{X: float32(x), Y: float32(y), Z: float32(-float64(d))})
+		cols = append(cols, sampleColor(img, bounds, wx, wy, gw, gh))
 		if gn[i] > EdgeRatioThreshold {
 			edgeCount++
 		}
+		// 暗像素富集：选中像素 → 原图像素（与 sampleColor 同映射）→ 亮度是否 <= p20。
+		imgX := int((float64(wx) + 0.5) * float64(iw) / float64(gw))
+		imgY := int((float64(wy) + 0.5) * float64(ih) / float64(gh))
+		if imgX < 0 {
+			imgX = 0
+		}
+		if imgX >= iw {
+			imgX = iw - 1
+		}
+		if imgY < 0 {
+			imgY = 0
+		}
+		if imgY >= ih {
+			imgY = ih - 1
+		}
+		if lumaBin(boundsPx(imgX, imgY)) < dark.thresholdBin {
+			darkCount++
+		}
 	}
-	ratio := float64(edgeCount) / float64(len(sel))
+	if len(pts) == 0 {
+		return nil, ErrNoPoints
+	}
+	n := float64(len(pts))
+	ratio := float64(edgeCount) / n
+	darkPointRatio := float64(darkCount) / n
+	darkPixelRatio := dark.darkPixelRatio
+	enrichment := darkEnrichmentOf(darkPointRatio, darkPixelRatio)
 
 	// 5) 结构模式默认不下采样；只有显式 voxel_size>0 才做（用户明确要求时）。
 	voxel := float32(0)
@@ -82,10 +121,12 @@ func buildStructure(depth []float32, w, h int, img image.Image, p Params, focal 
 			return nil, ErrNoPoints
 		}
 		voxel = p.VoxelSize
-		// 下采样后点位变了，按最终点重新统计强边缘占比。
+		// 下采样后点位变了，按最终点重新统计指标。
 		fxWork := focal * float64(gw) / float64(w)
 		fyWork := focal * float64(gh) / float64(h)
 		ratio = edgeRatioByInverse(pts, gw, gh, fxWork, fyWork, gn)
+		darkPointRatio = darkRatioByInverse(pts, gw, gh, fxWork, fyWork, img, dark)
+		enrichment = darkEnrichmentOf(darkPointRatio, darkPixelRatio)
 	}
 
 	minB, maxB := bbox(pts)
@@ -98,8 +139,8 @@ func buildStructure(depth []float32, w, h int, img image.Image, p Params, focal 
 		PointCount:     len(pts),
 		DepthWidth:     w,
 		DepthHeight:    h,
-		ImageWidth:     bounds.Dx(),
-		ImageHeight:    bounds.Dy(),
+		ImageWidth:     iw,
+		ImageHeight:    ih,
 		BBoxMin:        minB,
 		BBoxMax:        maxB,
 		DroppedPixels:  gw*gh - candidateCount,
@@ -109,25 +150,45 @@ func buildStructure(depth []float32, w, h int, img image.Image, p Params, focal 
 		SampleMode:     SampleModeStructure,
 		WorkRes:        maxInt(gw, gh),
 		EdgePointRatio: ratio,
+		DarkPointRatio: darkPointRatio,
+		DarkPixelRatio: darkPixelRatio,
+		DarkEnrichment: enrichment,
 	}, nil
 }
 
-// workResFor 按 max_points 推工作分辨率：长边 ≈ sqrt(max_points*3)，夹在 [256,2048]，
+// workResFor 决定结构采样的工作分辨率（长边像素）。
+//
+// 关键：**与 max_points 解耦**。workRes 决定"线稿最细能到多少"，应由原图细节决定；
+// max_points 只决定保留多少个点。
+//
+//   - Params.WorkRes == 0：自动 = clamp(round(原图长边/2), 512, 2048)
+//   - 显式给出：clamp 到 [256, 4096]
+//
 // 另一条边按深度图宽高比缩放（深度图与插画同比例，所以工作网格也同比例）。
-func workResFor(maxPoints, w, h int) (gw, gh int) {
-	long := int(math.Round(math.Sqrt(float64(maxPoints) * WorkResPointFactor)))
-	if long < MinWorkRes {
-		long = MinWorkRes
+func workResFor(p Params, imgW, imgH, depthW, depthH int) (gw, gh int) {
+	long := p.WorkRes
+	if long == 0 {
+		long = int(math.Round(float64(maxInt(imgW, imgH)) / 2))
+		if long < AutoWorkResMin {
+			long = AutoWorkResMin
+		}
+		if long > AutoWorkResMax {
+			long = AutoWorkResMax
+		}
+	} else {
+		if long < MinWorkRes {
+			long = MinWorkRes
+		}
+		if long > MaxWorkRes {
+			long = MaxWorkRes
+		}
 	}
-	if long > MaxWorkRes {
-		long = MaxWorkRes
-	}
-	if w >= h {
+	if depthW >= depthH {
 		gw = long
-		gh = int(math.Round(float64(long) * float64(h) / float64(w)))
+		gh = int(math.Round(float64(long) * float64(depthH) / float64(depthW)))
 	} else {
 		gh = long
-		gw = int(math.Round(float64(long) * float64(w) / float64(h)))
+		gw = int(math.Round(float64(long) * float64(depthW) / float64(depthH)))
 	}
 	if gw < 1 {
 		gw = 1
@@ -138,104 +199,150 @@ func workResFor(maxPoints, w, h int) (gw, gh int) {
 	return gw, gh
 }
 
-// upsampleDepth 把深度图双线性插值到 gw×gh。
+// depthNeighbor 是工作像素对应的一个深度图邻点（下标 + 双线性权重）。
+type depthNeighbor struct {
+	idx int
+	wt  float64
+}
+
+// workPixelNeighbors 返回工作像素 (gx,gy) 对应的 2×2 深度邻点与双线性权重。
+func workPixelNeighbors(w, h, gw, gh, gx, gy int) [4]depthNeighbor {
+	sy := (float64(gy)+0.5)*float64(h)/float64(gh) - 0.5
+	y0f := math.Floor(sy)
+	y0 := int(y0f)
+	fy := sy - y0f
+	if y0 < 0 {
+		y0, fy = 0, 0
+	}
+	if y0 >= h-1 {
+		y0, fy = h-1, 0
+	}
+	y1 := y0 + 1
+	if y1 >= h {
+		y1 = h - 1
+	}
+
+	sx := (float64(gx)+0.5)*float64(w)/float64(gw) - 0.5
+	x0f := math.Floor(sx)
+	x0 := int(x0f)
+	fx := sx - x0f
+	if x0 < 0 {
+		x0, fx = 0, 0
+	}
+	if x0 >= w-1 {
+		x0, fx = w-1, 0
+	}
+	x1 := x0 + 1
+	if x1 >= w {
+		x1 = w - 1
+	}
+
+	return [4]depthNeighbor{
+		{y0*w + x0, (1 - fx) * (1 - fy)},
+		{y0*w + x1, fx * (1 - fy)},
+		{y1*w + x0, (1 - fx) * fy},
+		{y1*w + x1, fx * fy},
+	}
+}
+
+// candidateDepthOK 标记哪些工作像素可采样：2×2 深度邻域里至少有一个有效深度。
+// 只算"是否可采样"，不存深度值（2048² 时省下 ~17MB 内存与一遍写入）。
+func candidateDepthOK(depth []float32, w, h, gw, gh int, discard []bool) []bool {
+	ok := make([]bool, gw*gh)
+	for gy := 0; gy < gh; gy++ {
+		for gx := 0; gx < gw; gx++ {
+			nbrs := workPixelNeighbors(w, h, gw, gh, gx, gy)
+			for _, n := range nbrs {
+				if validDepth(depth[n.idx]) {
+					ok[gy*gw+gx] = true
+					break
+				}
+			}
+		}
+	}
+	return ok
+}
+
+// sampleDepthBilinear 对单个工作像素做深度双线性上采样。
 //
 // 关键细节：**不跨深度跳变插值**——若 4 个邻点中有被 FilterDepthEdges 判为边界/无效的，
 // 就取权重最大的"干净"邻点深度。这样线稿处的点也能保留，但不会把遮挡边界拉成飞点丝。
-func upsampleDepth(depth []float32, w, h, gw, gh int, discard []bool) ([]float32, []bool) {
-	out := make([]float32, gw*gh)
-	ok := make([]bool, gw*gh)
-	for gy := 0; gy < gh; gy++ {
-		sy := (float64(gy)+0.5)*float64(h)/float64(gh) - 0.5
-		y0f := math.Floor(sy)
-		y0 := int(y0f)
-		fy := sy - y0f
-		if y0 < 0 {
-			y0, fy = 0, 0
+func sampleDepthBilinear(depth []float32, w, h, gw, gh int, discard []bool, gx, gy int) (float32, bool) {
+	var sum float64
+	validCount := 0
+	cleanCount := 0
+	bestCleanW := -1.0
+	var bestClean, anyVal float32
+	for _, n := range workPixelNeighbors(w, h, gw, gh, gx, gy) {
+		d := depth[n.idx]
+		if !validDepth(d) {
+			continue
 		}
-		if y0 >= h-1 {
-			y0, fy = h-1, 0
-		}
-		y1 := y0 + 1
-		if y1 >= h {
-			y1 = h - 1
-		}
-
-		for gx := 0; gx < gw; gx++ {
-			sx := (float64(gx)+0.5)*float64(w)/float64(gw) - 0.5
-			x0f := math.Floor(sx)
-			x0 := int(x0f)
-			fx := sx - x0f
-			if x0 < 0 {
-				x0, fx = 0, 0
+		validCount++
+		anyVal = d
+		sum += n.wt * float64(d)
+		if !discard[n.idx] {
+			cleanCount++
+			if n.wt > bestCleanW {
+				bestCleanW = n.wt
+				bestClean = d
 			}
-			if x0 >= w-1 {
-				x0, fx = w-1, 0
-			}
-			x1 := x0 + 1
-			if x1 >= w {
-				x1 = w - 1
-			}
-
-			type neighbor struct {
-				idx int
-				wt  float64
-			}
-			neighbors := [4]neighbor{
-				{y0*w + x0, (1 - fx) * (1 - fy)},
-				{y0*w + x1, fx * (1 - fy)},
-				{y1*w + x0, (1 - fx) * fy},
-				{y1*w + x1, fx * fy},
-			}
-
-			var sum float64
-			validCount := 0
-			cleanCount := 0
-			bestCleanW := -1.0
-			var bestClean, anyVal float32
-			for _, n := range neighbors {
-				d := depth[n.idx]
-				if !validDepth(d) {
-					continue
-				}
-				validCount++
-				anyVal = d
-				sum += n.wt * float64(d)
-				if !discard[n.idx] {
-					cleanCount++
-					if n.wt > bestCleanW {
-						bestCleanW = n.wt
-						bestClean = d
-					}
-				}
-			}
-			i := gy*gw + gx
-			switch {
-			case validCount == 0:
-				continue // 邻域全无效：该工作像素不可采样
-			case cleanCount == 4:
-				out[i] = float32(sum) // 四个邻点都干净：正常双线性
-			case bestCleanW >= 0:
-				out[i] = bestClean // 边界附近：取最近的干净邻点，不跨界插值
-			default:
-				out[i] = anyVal // 四个邻点都被判为边界（极窄带）：用最近的有效值
-			}
-			ok[i] = true
 		}
 	}
-	return out, ok
+	switch {
+	case validCount == 0:
+		return 0, false // 邻域全无效：该工作像素不可采样
+	case cleanCount == 4:
+		return float32(sum), true // 四个邻点都干净：正常双线性
+	case bestCleanW >= 0:
+		return bestClean, true // 边界附近：取最近的干净邻点，不跨界插值
+	default:
+		return anyVal, true // 四个邻点都被判为边界（极窄带）：用最近的有效值
+	}
 }
 
-// computeStructureMap 计算工作分辨率下的原图结构权重 Gn ∈ [0,1]。
+// structureWeights 计算工作分辨率下的两个采样权重通道：
 //
-// 步骤：原图 box 降采样成灰度 → 3×3 高斯轻微抑噪 → Sobel 梯度幅值 → 按 p99 归一化。
-// 用 p99 而不是 max 归一，是为了让个别极强边缘不把其余边缘压到 0；同时给 p99 设下限，
-// 避免"整幅图 99% 是平坦区域"时把噪声当边缘。
-func computeStructureMap(img image.Image, gw, gh int) []float32 {
+//	gn  = Sobel 梯度幅值，按 p99 归一化到 [0,1]        —— 找"边缘"
+//	ink = clamp((p95-lum)/(p95-p5), 0, 1)              —— 找"线体"（相对暗度）
+//
+// 之所以要 ink：线稿是深色细线，线的两侧梯度大、线体本身梯度≈0；只按梯度
+// 加权会采到两条边而不是实线。用**相对暗度**而不是绝对亮度，能自适应整体偏亮/偏暗的图。
+func structureWeights(img image.Image, gw, gh int) (gn []float32, ink []uint8) {
 	gray := grayGrid(img, gw, gh)
 	smoothed := blur3x3(gray, gw, gh)
-	mag := sobelMagnitude(smoothed, gw, gh)
+	gn = sobelNormalized(smoothed, gw, gh)
 
+	// 相对暗度：在平滑灰度上取 p5 / p95 拉伸（对噪声更稳；墨线在 2~3px 尺度上仍显著变暗）。
+	var hist [256]int
+	for _, v := range smoothed {
+		hist[v]++
+	}
+	n := len(smoothed)
+	ink = make([]uint8, n)
+	p5 := uint8Percentile(&hist, n, inkPercentileLow)
+	p95 := uint8Percentile(&hist, n, inkPercentileHigh)
+	den := p95 - p5
+	if den < 1 {
+		den = 1 // 近纯色图：Ink 全 0（无"更暗"可言），权重只剩边缘通道
+	}
+	inv := 255.0 / den
+	for i, v := range smoothed {
+		t := (p95 - float64(v)) * inv
+		if t < 0 {
+			t = 0
+		}
+		if t > 255 {
+			t = 255
+		}
+		ink[i] = uint8(t + 0.5)
+	}
+	return gn, ink
+}
+
+// sobelNormalized 对平滑灰度图算 Sobel 幅值并按 p99 归一化到 [0,1]。
+func sobelNormalized(smoothed []uint8, gw, gh int) []float32 {
+	mag := sobelMagnitude(smoothed, gw, gh)
 	out := make([]float32, len(mag))
 	maxV := 0.0
 	for _, m := range mag {
@@ -247,7 +354,7 @@ func computeStructureMap(img image.Image, gw, gh int) []float32 {
 		return out // 完全平坦：所有权重相同，退化为均匀分层抽样
 	}
 
-	// 直方图求 p99（比排序 60 万 float32 快一个量级）。
+	// 直方图求 p99（比排序 400 万 float32 快一个量级）。
 	hist := make([]int, sobelHistBins)
 	inv := float64(sobelHistBins-1) / maxV
 	for _, m := range mag {
@@ -289,6 +396,14 @@ func computeStructureMap(img image.Image, gw, gh int) []float32 {
 	return out
 }
 
+// computeStructureMap 计算工作分辨率下的 Sobel 结构图 Gn ∈ [0,1]
+// （只算梯度通道；depthpixel 模式测 edgePointRatio、以及测试用）。
+func computeStructureMap(img image.Image, gw, gh int) []float32 {
+	gray := grayGrid(img, gw, gh)
+	smoothed := blur3x3(gray, gw, gh)
+	return sobelNormalized(smoothed, gw, gh)
+}
+
 // pixelAt 返回原图相对 Bounds().Min 的 (x,y) 处 RGB（0..255）。
 type pixelAt func(x, y int) (r, g, b uint8)
 
@@ -327,14 +442,23 @@ func makePixelAt(img image.Image) pixelAt {
 	}
 }
 
-// grayGrid 把原图缩小成 gw×gh 的灰度图，每个工作像素取覆盖源区域内的
-// graySamplesPerAxis² 个均匀采样点做平均（避免细线被最近邻抽样漏掉）。
+// grayGrid 把原图缩小成 gw×gh 的灰度图。
+// 每个工作像素取覆盖源区域内的 n×n 个均匀采样点做平均（n 按覆盖大小自适应，
+// 避免细线被最近邻抽样漏掉，同时控制 2048² 时的开销）。
 func grayGrid(img image.Image, gw, gh int) []uint8 {
 	bounds := img.Bounds()
 	iw, ih := bounds.Dx(), bounds.Dy()
 	px := makePixelAt(img)
 	out := make([]uint8, gw*gh)
-	const n = graySamplesPerAxis
+	boxX := (iw + gw - 1) / gw
+	boxY := (ih + gh - 1) / gh
+	box := maxInt(boxX, boxY)
+	n := graySamplesPerAxis
+	if box <= 1 {
+		n = 1
+	} else if box <= 2 {
+		n = 2
+	}
 	for gy := 0; gy < gh; gy++ {
 		sy0 := gy * ih / gh
 		sy1 := (gy + 1) * ih / gh
@@ -442,11 +566,22 @@ func sobelMagnitude(src []uint8, w, h int) []float32 {
 }
 
 // selectStructured 做确定性分层抽样：工作网格切成小块（层），
-// 每层预算 ∝ 该层权重和（w = 1 + k*Gn），层内按权重从大到小选点。
+// 每层预算 ∝ 该层权重和（w = 1 + kEdge*Gn + kInk*Ink），层内做加权系统抽样。
 //
 // 全程无随机数、无 map 遍历，输出顺序与输入/并行度无关 → 同输入逐字节可复现。
 // 返回被选中的工作像素下标与候选像素总数。
-func selectStructured(gn []float32, ok []bool, gw, gh, maxPoints int, k float64) ([]int32, int) {
+func selectStructured(gn []float32, ink []uint8, ok []bool, gw, gh, maxPoints int, kEdge, kInk float64) ([]int32, int) {
+	weightOf := func(i int) float64 {
+		w := 1.0
+		if kEdge != 0 {
+			w += kEdge * float64(gn[i])
+		}
+		if kInk != 0 {
+			w += kInk * float64(ink[i]) / 255.0
+		}
+		return w
+	}
+
 	tileSize := (maxInt(gw, gh) + structureTileDivisor - 1) / structureTileDivisor
 	if tileSize < structureTileMin {
 		tileSize = structureTileMin
@@ -472,7 +607,7 @@ func selectStructured(gn []float32, ok []bool, gw, gh, maxPoints int, k float64)
 			}
 			t := (y/tileSize)*tw + x/tileSize
 			tiles[t].cands = append(tiles[t].cands, int32(i))
-			w := 1 + k*float64(gn[i])
+			w := weightOf(i)
 			tiles[t].wsum += w
 			totalW += w
 			candidateCount++
@@ -558,8 +693,8 @@ func selectStructured(gn []float32, ok []bool, gw, gh, maxPoints int, k float64)
 			continue
 		}
 		// 层内做"加权系统抽样"：沿行序扫描候选，累计 p_i = w_i*q/W_tile，
-		// 越过整数就选一个。这样平坦区域会被**均匀铺开**（不会因为权重相同
-		// 就退化成"取前 q 个"的条纹），边缘像素则按权重更高概率被选中。
+		// 越过整数就选一个。平坦区域会被**均匀铺开**（不会因为权重相同退化成
+		// "取前 q 个"的条纹），权重高的点（边缘/墨）被更高概率选中。
 		var (
 			acc      float64
 			picked   = make([]bool, len(cands))
@@ -568,7 +703,7 @@ func selectStructured(gn []float32, ok []bool, gw, gh, maxPoints int, k float64)
 			q        = float64(b)
 		)
 		for j, ci := range cands {
-			acc += (1 + k*float64(gn[ci])) * q / wsum
+			acc += weightOf(int(ci)) * q / wsum
 			if acc >= 1 {
 				acc--
 				picked[j] = true
