@@ -19,6 +19,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 import depthFrag from './styles/depth.frag.glsl?raw';
+import halftoneFrag from './styles/halftone.frag.glsl?raw';
 import depthVert from './styles/depth.vert.glsl?raw';
 import pointsVert from './styles/points.vert.glsl?raw';
 import postEdgeFrag from './styles/post-edge.frag.glsl?raw';
@@ -56,6 +57,20 @@ const POINT_SIZE_PER_SPACING = 0.5;
 const POINT_SIZE_MIN = 1.2;
 const POINT_SIZE_MAX = 8.0;
 
+// ── 相机限位 / 摆动 ────────────────────────────────────────────────────────
+/**
+ * 摆动时俯仰幅度 = 方位幅度 × 这个比例。
+ * 真实插画的深度只是「剪影 + 平板」，转太多会露出板的边缘；
+ * 方位摆动最能看出体积感，俯仰只给一点点，避免看到板的上下边缘。
+ */
+const SWAY_PITCH_RATIO = 0.5;
+/** 摆动时允许的最低仰角（度），防止相机钻到地面以下 */
+const SWAY_MIN_ELEVATION_DEG = 4;
+/** 实时预览的摆动周期（秒）。录制时周期由 N 帧决定，不用这个 */
+const LIVE_SWAY_PERIOD = 8;
+/** 摆动幅度的参数上限（度） */
+const SWAY_MAX_DEG = 45;
+
 /** 沸腾：一个可回绕循环的「逻辑帧」数（60 fps 下 0.8 s） */
 const BOIL_CYCLE_FRAMES = 48;
 /** 沸腾重绘频率（§9：8~12 fps 最像手绘） */
@@ -90,8 +105,10 @@ export interface ViewerStats {
 // 录制 / 出帧：固定 30fps 的确定性时钟
 //
 // 关键：**不走真实时间**。捕获时一切随时间变化的状态都由「帧索引 i」直接算出来：
-//   旋转方位角 azimuth(i) = azimuth0 + 2π · turns · (i mod N) / N
-//   沸腾相位   phase(i)   = floor((i mod N) / framesPerPhase) mod phases
+//   摆动相位 θ(i) = 2π · swings · (i mod N) / N
+//   方位角   azimuth(i)   = baseAzimuth + A · sin(θ(i))
+//   俯仰角   elevation(i) = baseElevation + A·PITCH_RATIO · sin(θ(i))
+//   沸腾相位 phase(i)     = floor((i mod N) / framesPerPhase) mod phases
 // 于是状态是 i 的纯函数，且 i = N 与 i = 0 逐位相同（因为先取模），
 // 这就是无缝循环的形式化保证（对齐算式见 README / 报告）。
 // ─────────────────────────────────────────────────────────────────────────────
@@ -102,15 +119,18 @@ export const CAPTURE_FPS = 30;
 export interface CaptureSpec {
   /** 总帧数 = 秒数 × CAPTURE_FPS */
   totalFrames: number;
-  /** 循环里转几圈（整数，默认 1）；结束方位角 = 起始 + 2π·turns */
-  turns?: number;
+  /** 循环里摆动几个完整来回（整数，默认 1）。1 = 一个来回到位 */
+  swings?: number;
   /** 沸腾重绘频率（Hz，默认 10 = §9 推荐的 8~12） */
   boilFps?: number;
 }
 
 export interface CapturePlan {
   totalFrames: number;
-  turns: number;
+  /** 一个循环里摆动几个来回 */
+  swings: number;
+  /** 摆动幅度（度）——录制时的快照，用于文件名/自检 */
+  swayAmplitudeDeg: number;
   framesPerPhase: number;
   phases: number;
   /** 实际沸腾重绘频率 */
@@ -120,8 +140,6 @@ export interface CapturePlan {
 }
 
 interface CaptureState extends CapturePlan {
-  azimuth0: number;
-  elevation: number;
   distance: number;
   target: THREE.Vector3;
   savedPosition: THREE.Vector3;
@@ -162,6 +180,7 @@ interface SmoothUniforms {
   uRangeTol: NumericUniform;
 }
 
+/** 点画印刷的合成 pass uniform */
 interface CompositeUniforms {
   tColor: THREE.IUniform<THREE.Texture | null>;
   tDepth: THREE.IUniform<THREE.Texture | null>;
@@ -175,6 +194,16 @@ interface CompositeUniforms {
   uGrain: NumericUniform;
   uBoilJitter: THREE.IUniform<THREE.Vector2>;
   uBoilFlicker: NumericUniform;
+}
+
+/** 半调漫画的合成 pass uniform（多了网点相关的那几个） */
+interface HalftoneUniforms extends CompositeUniforms {
+  uPaper: THREE.IUniform<THREE.Color>;
+  uHalftoneStrength: NumericUniform;
+  uHalftoneCell: NumericUniform;
+  uHalftoneAngle: NumericUniform;
+  uDensityGamma: NumericUniform;
+  uHalftoneOffset: THREE.IUniform<THREE.Vector2>;
 }
 
 /** 配置 blue noise 纹理（点画阈值 + 纸颗粒共用） */
@@ -215,11 +244,14 @@ export class Viewer {
   private readonly depthMaterial: THREE.ShaderMaterial;
   private readonly smoothMaterial: THREE.ShaderMaterial;
   private readonly compositeMaterial: THREE.ShaderMaterial;
+  /** 半调漫画的合成 pass（params.halftone > 0 时使用） */
+  private readonly halftoneMaterial: THREE.ShaderMaterial;
 
   private readonly pointUniforms: PointUniforms;
   private readonly depthUniforms: DepthUniforms;
   private readonly smoothUniforms: SmoothUniforms;
   private readonly compositeUniforms: CompositeUniforms;
+  private readonly halftoneUniforms: HalftoneUniforms;
 
   private readonly quadScene = new THREE.Scene();
   private readonly quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
@@ -254,6 +286,16 @@ export class Viewer {
   private capture: CaptureState | null = null;
   /** 输出尺寸覆盖（null = 跟窗口走） */
   private outputSize: { width: number; height: number } | null = null;
+
+  // ── 取景基准位姿（摆动与限位都围绕它）──
+  /** 取景基准方位角（rad） */
+  private baseAzimuth = 0;
+  /** 取景基准仰角（rad） */
+  private baseElevation = 0;
+  /** 实时摆动时钟（秒，mod LIVE_SWAY_PERIOD） */
+  private swayClock = 0;
+  /** 参数被内部改动（例如拖拽自动关掉摆动）时通知面板同步 */
+  onInternalParamChange: (() => void) | null = null;
 
   // ── 随点云变化的取景 / 深度参数（真实点云尺度不同，不能写死）──
   /** 点大小换算用的参考视距（uPointSize 是"这个距离下的像素直径"） */
@@ -299,8 +341,15 @@ export class Viewer {
     this.controls.minDistance = 1.4;
     this.controls.maxDistance = 14;
     this.controls.maxPolarAngle = Math.PI * 0.492; // 不钻到地面以下
-    this.controls.autoRotateSpeed = 0.9;
+    this.controls.autoRotate = false; // 自动运动由我们的「摆动」接管，不用 autoRotate
     this.controls.update();
+
+    // 用户一拖拽就关掉自动摆动（否则手和自动运动会打架），并通知面板同步勾选框
+    this.controls.addEventListener('start', () => {
+      if (!this.params.autoSway) return;
+      this.params.autoSway = false;
+      this.onInternalParamChange?.();
+    });
 
     // ── uniforms（先建对象，material 和 applyParams 共用同一份引用）──
     this.pointUniforms = {
@@ -390,6 +439,25 @@ export class Viewer {
       depthWrite: false,
     });
 
+    // 半调漫画的合成 pass：同一份 tColor/tDepth，多做一次屏幕空间网点化
+    this.halftoneUniforms = {
+      ...this.compositeUniforms,
+      uPaper: this.pointUniforms.uPaper,
+      uHalftoneStrength: { value: this.params.halftone },
+      uHalftoneCell: { value: this.params.halftoneCell },
+      uHalftoneAngle: { value: THREE.MathUtils.degToRad(this.params.halftoneAngle) },
+      uDensityGamma: { value: this.params.densityGamma },
+      uHalftoneOffset: { value: new THREE.Vector2() },
+    };
+    this.halftoneMaterial = new THREE.ShaderMaterial({
+      name: 'halftone-manga/composite',
+      uniforms: this.halftoneUniforms as unknown as Record<string, THREE.IUniform>,
+      vertexShader: quadVert,
+      fragmentShader: halftoneFrag,
+      depthTest: false,
+      depthWrite: false,
+    });
+
     this.quadMesh = new THREE.Mesh(this.quadGeometry, this.smoothMaterial);
     this.quadMesh.frustumCulled = false;
     this.quadScene.add(this.quadMesh);
@@ -457,14 +525,19 @@ export class Viewer {
     // 相机方向保持 3/4 俯视（艺术取景，不是自动寻找最佳视角）
     const dir = new THREE.Vector3(0.34, 0.36, 0.87).normalize();
     this.controls.target.copy(center);
-    this.camera.position.copy(center).addScaledVector(dir, fitDistance);
+
+    // 取景基准位姿：摆动与角度限位都围绕它（真实插画→这一对角度就是深度图的正面方向）
+    this.baseAzimuth = Math.atan2(dir.x, dir.z);
+    this.baseElevation = Math.asin(dir.y);
+
     this.camera.near = Math.max(fitDistance * 0.005, 1e-5);
     this.camera.far = fitDistance * 12 + diagonal * 2;
     this.camera.updateProjectionMatrix();
 
     this.controls.minDistance = radius * 0.25;
     this.controls.maxDistance = fitDistance * 6;
-    this.controls.maxPolarAngle = Math.PI * 0.492;
+    this.poseFromOffsets(0, 0, fitDistance);
+    this.applySwayLimits();
     this.controls.update();
 
     this.frameInfo = { center: center.clone(), radius, distance: fitDistance };
@@ -487,6 +560,79 @@ export class Viewer {
     );
     this.params.pointSize = autoPointSize;
     this.applyParams();
+  }
+
+  /**
+   * 把相机放到「相对取景基准的偏移角度」上。
+   * 实时摆动与录制捕获共用这一条路径，保证两者观感一致、且都能回绕。
+   */
+  private poseFromOffsets(azimuthOffsetRad: number, elevationOffsetRad: number, distance: number): void {
+    const azimuth = this.baseAzimuth + azimuthOffsetRad;
+    const elevation = THREE.MathUtils.clamp(
+      this.baseElevation + elevationOffsetRad,
+      THREE.MathUtils.degToRad(SWAY_MIN_ELEVATION_DEG),
+      Math.PI / 2 - 0.05,
+    );
+    const cosElevation = Math.cos(elevation);
+    const target = this.controls.target;
+    this.camera.position.set(
+      target.x + distance * cosElevation * Math.sin(azimuth),
+      target.y + distance * Math.sin(elevation),
+      target.z + distance * cosElevation * Math.cos(azimuth),
+    );
+    this.camera.lookAt(target);
+    this.camera.updateMatrixWorld();
+  }
+
+  /** 摆动幅度（度）→ 弧度 */
+  private swayAmplitudeRad(): number {
+    return THREE.MathUtils.degToRad(
+      THREE.MathUtils.clamp(this.params.swayAmplitude, 0, SWAY_MAX_DEG),
+    );
+  }
+
+  /**
+   * 把 OrbitControls 的方位/俯仰限制在「取景基准 ± 摆动幅度」内。
+   *
+   * 为什么必须限位：真实插画的深度只有剪影平板，转多了就露馅（go/no-go 结论）。
+   * 幅度 0 时把相机完全锁死在正面。
+   */
+  private applySwayLimits(): void {
+    const amplitude = this.swayAmplitudeRad();
+    this.controls.minAzimuthAngle = this.baseAzimuth - amplitude;
+    this.controls.maxAzimuthAngle = this.baseAzimuth + amplitude;
+
+    const basePolar = Math.PI / 2 - this.baseElevation;
+    const pitchAmplitude = amplitude * SWAY_PITCH_RATIO;
+    this.controls.minPolarAngle = Math.max(0.05, basePolar - pitchAmplitude);
+    this.controls.maxPolarAngle = Math.min(Math.PI * 0.492, basePolar + pitchAmplitude);
+  }
+
+  /**
+   * 把相机设到「基准 + 水平偏移角度」上（度）。
+   * 给自动化截图 / 预设立场用；也方便以后接 Go 侧传来的正面朝向。
+   */
+  setSwingAngles(azimuthOffsetDeg: number, elevationOffsetDeg = 0): void {
+    const distance = this.camera.position.distanceTo(this.controls.target);
+    this.poseFromOffsets(
+      THREE.MathUtils.degToRad(azimuthOffsetDeg),
+      THREE.MathUtils.degToRad(elevationOffsetDeg),
+      distance,
+    );
+    this.controls.update();
+    if (!this.capture) this.renderFrame();
+  }
+
+  /** 当前相机相对取景基准的方位/俯仰偏移（度），给自检/统计用 */
+  getSwingAngles(): { azimuthDeg: number; elevationDeg: number } {
+    const offset = this.camera.position.clone().sub(this.controls.target);
+    const distance = Math.max(offset.length(), 1e-6);
+    const azimuth = Math.atan2(offset.x, offset.z);
+    const elevation = Math.asin(THREE.MathUtils.clamp(offset.y / distance, -1, 1));
+    return {
+      azimuthDeg: THREE.MathUtils.radToDeg(azimuth - this.baseAzimuth),
+      elevationDeg: THREE.MathUtils.radToDeg(elevation - this.baseElevation),
+    };
   }
 
   /** 到 center 距离的第 p 分位（抽样计算，够用且快） */
@@ -557,7 +703,14 @@ export class Viewer {
     this.compositeUniforms.uVignette.value = p.vignette;
     this.compositeUniforms.uGrain.value = p.grain;
 
-    this.controls.autoRotate = p.autoRotate;
+    // 半调漫画（网点在合成 pass 里做）
+    this.halftoneUniforms.uHalftoneStrength.value = p.halftone;
+    this.halftoneUniforms.uHalftoneCell.value = p.halftoneCell;
+    this.halftoneUniforms.uHalftoneAngle.value = THREE.MathUtils.degToRad(p.halftoneAngle);
+    this.halftoneUniforms.uDensityGamma.value = p.densityGamma;
+
+    // 摆动幅度变了要重设角度限位（0 = 锁死正面）
+    this.applySwayLimits();
   }
 
   // ── 尺寸 ────────────────────────────────────────────────────────────────
@@ -660,7 +813,19 @@ export class Viewer {
     this.boilClock = (this.boilClock + dt * 60) % BOIL_CYCLE_FRAMES;
     this.updateBoil();
 
-    this.controls.update(dt);
+    if (this.params.autoSway) {
+      // 自动**摆动**（往返）而不是转圈：真实插画的深度只是剪影平板，转满一圈会露馅。
+      // 这里不走 OrbitControls 的 autoRotate（它只会单向绕圈且会被角度限位卡死）。
+      this.swayClock = (this.swayClock + dt) % LIVE_SWAY_PERIOD;
+      const phase = (this.swayClock / LIVE_SWAY_PERIOD) * Math.PI * 2;
+      const amplitude = this.swayAmplitudeRad();
+      const sway = Math.sin(phase);
+      const distance = this.camera.position.distanceTo(this.controls.target);
+      this.poseFromOffsets(amplitude * sway, amplitude * SWAY_PITCH_RATIO * sway, distance);
+    } else {
+      this.controls.update(dt);
+    }
+
     this.renderFrame();
     this.updateFps();
   };
@@ -688,6 +853,7 @@ export class Viewer {
       this.pointUniforms.uBoilSeed.value = 0;
       this.compositeUniforms.uBoilJitter.value.set(0, 0);
       this.compositeUniforms.uBoilFlicker.value = 0;
+      this.halftoneUniforms.uHalftoneOffset.value.set(0, 0);
       return;
     }
 
@@ -704,6 +870,10 @@ export class Viewer {
       (r3 - 0.5) * 2 * BOIL_LINE_JITTER,
     );
     this.compositeUniforms.uBoilFlicker.value = r1;
+
+    // §3 抖动换序：网点网格按相位整体平移（< 一个 cell），网点「重排」而不是闪`r
+    const cell = Math.max(this.halftoneUniforms.uHalftoneCell.value, 2);
+    this.halftoneUniforms.uHalftoneOffset.value.set((r2 - 0.5) * cell * 0.7, (r3 - 0.5) * cell * 0.7);
   }
 
   // ── 录制 / 出帧 ────────────────────────────────────────────────────────
@@ -727,7 +897,7 @@ export class Viewer {
     if (this.capture) throw new Error('已经处在捕获状态');
 
     const total = Math.max(1, Math.round(spec.totalFrames));
-    const turns = Math.max(1, Math.round(spec.turns ?? 1));
+    const swings = Math.max(1, Math.round(spec.swings ?? 1));
     const boilFps = Math.max(1, spec.boilFps ?? 10);
 
     // 沸腾每相几帧：从 30/boilFps 往小取，直到能整除总帧数（保证相位在 N 处回绕到 0）
@@ -735,20 +905,19 @@ export class Viewer {
     while (framesPerPhase > 1 && total % framesPerPhase !== 0) framesPerPhase -= 1;
     if (total % framesPerPhase !== 0) framesPerPhase = 1; // 兜底：一帧一相
     const phases = total / framesPerPhase;
+    const swayAmplitudeDeg = THREE.MathUtils.clamp(this.params.swayAmplitude, 0, SWAY_MAX_DEG);
 
     const target = this.controls.target.clone();
-    const offset = this.camera.position.clone().sub(target);
-    const distance = Math.max(offset.length(), 1e-6);
+    const distance = Math.max(this.camera.position.distanceTo(target), 1e-6);
 
     this.capture = {
       totalFrames: total,
-      turns,
+      swings,
+      swayAmplitudeDeg,
       framesPerPhase,
       phases,
       boilHz: CAPTURE_FPS / framesPerPhase,
       seconds: total / CAPTURE_FPS,
-      azimuth0: Math.atan2(offset.x, offset.z),
-      elevation: Math.asin(THREE.MathUtils.clamp(offset.y / distance, -1, 1)),
       distance,
       target,
       savedPosition: this.camera.position.clone(),
@@ -756,10 +925,10 @@ export class Viewer {
     };
 
     this.controls.enabled = false;
-    this.controls.autoRotate = false;
     return {
       totalFrames: total,
-      turns,
+      swings,
+      swayAmplitudeDeg,
       framesPerPhase,
       phases,
       boilHz: this.capture.boilHz,
@@ -776,17 +945,13 @@ export class Viewer {
     if (!capture) throw new Error('未开始捕获');
 
     const wrapped = ((index % capture.totalFrames) + capture.totalFrames) % capture.totalFrames;
-    const angle = Math.PI * 2 * capture.turns * (wrapped / capture.totalFrames);
-    const azimuth = capture.azimuth0 + angle;
-    const cosElevation = Math.cos(capture.elevation);
 
-    this.camera.position.set(
-      capture.target.x + capture.distance * cosElevation * Math.sin(azimuth),
-      capture.target.y + capture.distance * Math.sin(capture.elevation),
-      capture.target.z + capture.distance * cosElevation * Math.cos(azimuth),
-    );
-    this.camera.lookAt(capture.target);
-    this.camera.updateMatrixWorld();
+    // 摆动：θ 走完整周期；sin 让方位/俯仰在 T 处回到起点
+    const phaseAngle = Math.PI * 2 * capture.swings * (wrapped / capture.totalFrames);
+    const amplitude = THREE.MathUtils.degToRad(capture.swayAmplitudeDeg);
+    const sway = Math.sin(phaseAngle);
+
+    this.poseFromOffsets(amplitude * sway, amplitude * SWAY_PITCH_RATIO * sway, capture.distance);
 
     const phase = Math.floor(wrapped / capture.framesPerPhase) % capture.phases;
     this.applyBoilPhase(phase);
@@ -830,8 +995,9 @@ export class Viewer {
   /** 捕获计划信息（未在捕获时返回 null） */
   get capturePlan(): CapturePlan | null {
     if (!this.capture) return null;
-    const { totalFrames, turns, framesPerPhase, phases, boilHz, seconds } = this.capture;
-    return { totalFrames, turns, framesPerPhase, phases, boilHz, seconds };
+    const { totalFrames, swings, swayAmplitudeDeg, framesPerPhase, phases, boilHz, seconds } =
+      this.capture;
+    return { totalFrames, swings, swayAmplitudeDeg, framesPerPhase, phases, boilHz, seconds };
   }
 
   private renderFrame(): void {
@@ -869,7 +1035,11 @@ export class Viewer {
     renderer.setClearColor(this.paperColor, 1);
     this.compositeUniforms.tColor.value = colorTarget.texture;
     this.compositeUniforms.tDepth.value = smoothTarget.texture;
-    this.quadMesh.material = this.compositeMaterial;
+    this.halftoneUniforms.tColor.value = colorTarget.texture;
+    this.halftoneUniforms.tDepth.value = smoothTarget.texture;
+    // 网点强度 > 0 时切到半调漫画的合成 pass
+    this.quadMesh.material =
+      this.params.halftone > 0.001 ? this.halftoneMaterial : this.compositeMaterial;
     renderer.render(this.quadScene, this.quadCamera);
   }
 
@@ -926,6 +1096,7 @@ export class Viewer {
     this.depthMaterial.dispose();
     this.smoothMaterial.dispose();
     this.compositeMaterial.dispose();
+    this.halftoneMaterial.dispose();
     this.quadGeometry.dispose();
     this.colorTarget?.dispose();
     this.depthTarget?.dispose();
@@ -945,7 +1116,11 @@ export interface Illust3dDebug {
   /** A 阶段约定：逐帧导出 PNG blob（GIF 由 Go 侧 image/gif 编码） */
   captureFrames?: (
     count: number,
-    options?: { turns?: number; size?: { width: number; height: number }; includeWrapFrame?: boolean },
+    options?: {
+      swings?: number;
+      size?: { width: number; height: number };
+      includeWrapFrame?: boolean;
+    },
   ) => Promise<Blob[]>;
   /** 录一个完整循环的 WebM */
   recordWebM?: (

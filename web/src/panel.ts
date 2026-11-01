@@ -35,6 +35,8 @@ interface SliderDef {
   max: number;
   step: number;
   digits: number;
+  /** 只有这个参数 > above 时才显示（半调相关参数在点画模式下藏起来，面板别太长） */
+  dependsOn?: { key: NumericParamKey; above: number };
 }
 
 /** 顺序即面板顺序：L1 → L2 → L4 */
@@ -50,6 +52,10 @@ const SLIDERS: readonly SliderDef[] = [
   { key: 'mono', label: '单色墨点', min: 0, max: 1, step: 0.01, digits: 2 },
   { key: 'grain', label: '纸颗粒', min: 0, max: 0.3, step: 0.005, digits: 3 },
   { key: 'vignette', label: '暗角', min: 0, max: 1, step: 0.01, digits: 2 },
+  { key: 'swayAmplitude', label: '摆动幅度 ±°', min: 0, max: 45, step: 1, digits: 0 },
+  { key: 'halftone', label: '半调网点', min: 0, max: 1, step: 0.01, digits: 2 },
+  { key: 'halftoneCell', label: '网点大小 px', min: 3, max: 14, step: 0.5, digits: 1, dependsOn: { key: 'halftone', above: 0.001 } },
+  { key: 'halftoneAngle', label: '网屏角度 °', min: 0, max: 90, step: 1, digits: 0, dependsOn: { key: 'halftone', above: 0.001 } },
 ];
 
 export interface PanelOptions {
@@ -94,9 +100,13 @@ export class Panel {
     const title = document.createElement('h1');
     title.textContent = 'ILLUST3D · 点画印刷';
     const subtitle = document.createElement('small');
-    subtitle.textContent = 'L1 软片 · L2 blue noise 点画 + 深度描边 · L3 沸腾 · L4 空气透视';
+    subtitle.textContent = '\u8f6f\u7247 + \u70b9\u753b/\u534a\u8c03 + \u6df1\u5ea6\u63cf\u8fb9 + \u6cb8\u817e + \u7a7a\u6c14\u900f\u89c6 \u00b7 H \u6536\u8d77';
     title.append(subtitle);
     panel.append(title);
+
+    // 参数区可滚动、导出区钉在底部（参数多，不能把导出按钮挤出去）
+    const scrollArea = document.createElement('div');
+    scrollArea.className = 'panel-scroll';
 
     // ── 预设 ──
     const presets = document.createElement('div');
@@ -113,34 +123,28 @@ export class Panel {
       this.presetButtons.set(key, button);
       presets.append(button);
     }
-    panel.append(presets);
+    scrollArea.append(presets);
     this.setActivePreset(options.activePreset);
 
     // ── 滑块 ──
     for (const def of SLIDERS) {
-      panel.append(this.buildSlider(def));
+      scrollArea.append(this.buildSlider(def));
     }
 
-    panel.append(document.createElement('hr'));
+    scrollArea.append(document.createElement('hr'));
 
     // ── 开关 ──
-    panel.append(this.buildToggle('boil', '沸腾线（每 2~3 帧换相位）'));
-    panel.append(this.buildToggle('autoRotate', '自动慢速旋转（录动图）'));
+    scrollArea.append(this.buildToggle('boil', '沸腾线（每 2~3 帧换相位）'));
+    scrollArea.append(this.buildToggle('autoSway', '自动摆动（±15° 来回，不转圈）'));
 
     // ── 背景色 ──
-    panel.append(this.buildColor('paper', '背景 / 纸色'));
+    scrollArea.append(this.buildColor('paper', '背景 / 纸色'));
 
+    panel.append(scrollArea);
     panel.append(document.createElement('hr'));
 
     // ── 导出（A 阶段：WebM 循环录制 + 帧序列 + 无缝自检）──
     panel.append(this.buildExportSection());
-
-    panel.append(document.createElement('hr'));
-
-    const hint = document.createElement('div');
-    hint.className = 'hint';
-    hint.textContent = '拖拽旋转 · 滚轮缩放 · H 键收起面板';
-    panel.append(hint);
 
     this.sync();
     this.renderHud();
@@ -182,10 +186,18 @@ export class Panel {
       output.textContent = value.toFixed(def.digits);
     });
 
+    // 依赖其它参数的滑块：点画模式下把半调参数藏起来（面板本来就长）
+    const dependsOn = def.dependsOn;
+    if (dependsOn) {
+      this.syncers.push(() => {
+        row.hidden = this.params[dependsOn.key] <= dependsOn.above;
+      });
+    }
+
     return row;
   }
 
-  private buildToggle(key: 'boil' | 'autoRotate', labelText: string): HTMLElement {
+  private buildToggle(key: 'boil' | 'autoSway', labelText: string): HTMLElement {
     const row = document.createElement('div');
     row.className = 'row check';
 

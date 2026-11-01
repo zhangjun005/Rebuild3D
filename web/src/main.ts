@@ -79,6 +79,8 @@ async function boot(): Promise<void> {
     },
   });
   viewer.onStats = (stats) => panel.updateStats(stats);
+  // 拖拽会自动关掉摆动（viewer 内部改 params），面板要跟着更新勾选框
+  viewer.onInternalParamChange = () => panel.sync();
 
   /** 导出流程（录制 / 出帧 / 无缝自检） */
   const runExport = async (request: ExportRequest): Promise<void> => {
@@ -115,7 +117,7 @@ async function boot(): Promise<void> {
             `已录制 ${name}`,
             `${(result.blob.size / 1048576).toFixed(2)} MB · ${result.mimeType}`,
             `计划 ${result.plan.totalFrames} 帧 / ${result.plan.seconds.toFixed(1)}s / ` +
-              `${result.plan.turns} 圈 / 沸腾 ${result.plan.boilHz.toFixed(1)}Hz` +
+              `\$\{result.plan.swings\} \u4e2a\u6765\u56de / \u6446\u5e45 \u00b1\$\{result.plan.swayAmplitudeDeg}\u00b0 / 沸腾 ${result.plan.boilHz.toFixed(1)}Hz` +
               `（${result.plan.framesPerPhase} 帧一相 × ${result.plan.phases} 相）`,
             `回读 ${probe.width}×${probe.height} · 时长 ${probe.duration.toFixed(3)}s` +
               `（理论 ${((result.plan.totalFrames - 1) / CAPTURE_FPS).toFixed(3)}s` +

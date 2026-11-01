@@ -39,7 +39,9 @@
         right: 12px;
         width: 268px;
         max-height: calc(100vh - 24px);
-        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
         padding: 10px 12px 12px;
         border-radius: 10px;
         background: var(--ui-bg);
@@ -50,6 +52,13 @@
       }
       #panel.hidden {
         display: none;
+      }
+      .panel-scroll {
+        flex: 1 1 auto;
+        min-height: 120px;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        padding-right: 2px;
       }
       #panel h1 {
         margin: 0 0 8px;

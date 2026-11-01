@@ -27,6 +27,14 @@ export interface RenderParams {
   /** 单色纸墨 0..1 */
   mono: number;
 
+  // ── L2 半调（屏幕空间网点，在合成 pass 做）──
+  /** 半调网点强度 0..1。> 0 时合成 pass 切到 halftone（网点）而不是点云自带点画 */
+  halftone: number;
+  /** 网点 cell 大小（屏幕像素） */
+  halftoneCell: number;
+  /** 网屏角度（度，印刷常用 15/45/75） */
+  halftoneAngle: number;
+
   // ── L3 时间层 ──
   /** 沸腾线开关 */
   boil: boolean;
@@ -42,15 +50,23 @@ export interface RenderParams {
   paper: string;
 
   // ── 相机 ──
-  /** 自动慢速旋转（录动图用） */
-  autoRotate: boolean;
+  /**
+   * 自动**摆动**（不是转圈）：真实插画深度只是剪影，转满一圈会露馅（go/no-go 结论）。
+   * 摆动是往返运动，录制时一个周期 T 内走完整来回，state(T) ≡ state(0) 仍成立。
+   */
+  autoSway: boolean;
+  /**
+   * 摆动 / 环绕的幅度上限（度）：方位角与俯仰角都限制在取景基准的 ±amp 内。
+   * 0 = 锁死正面（只用来看平面剪影）；默认 15（±15° 刚好不露主体板边缘）。
+   */
+  swayAmplitude: number;
 }
 
 export type NumericParamKey = {
   [K in keyof RenderParams]: RenderParams[K] extends number ? K : never;
 }[keyof RenderParams];
 
-export const PRESET_KEYS = ['stipple-print', 'ink-edge', 'raw'] as const;
+export const PRESET_KEYS = ['stipple-print', 'halftone-manga', 'ink-edge', 'raw'] as const;
 export type PresetKey = (typeof PRESET_KEYS)[number];
 
 export interface Preset {
@@ -77,12 +93,47 @@ export const PRESETS: Record<PresetKey, Preset> = {
       edgeThreshold: 0.14,
       edgeWidth: 2.0,
       mono: 1.0,
+      halftone: 0,
+      halftoneCell: 7,
+      halftoneAngle: 45,
       boil: true,
       fogAmount: 0.75,
       vignette: 0.28,
       grain: 0.03,
       paper: '#f2ece1',
-      autoRotate: true,
+      autoSway: true,
+      swayAmplitude: 15,
+    },
+  },
+  /**
+   * §2.4 半调网点 + 粗描边 = 黑白漫画。
+   *
+   * 注意这里的组合逻辑：点云本身**不做点画**（stipple=0），它只负责提供一张连续调图像
+   * （颜色 pass），网点化是合成 pass 干的（见 styles/halftone.frag.glsl 文件头）。
+   * mono=0 保留原色只是为了拿到亮度；网点输出是纯 墨/纸 两色。
+   */
+  'halftone-manga': {
+    label: '半调漫画',
+    params: {
+      pointSize: 2.2, // 小点 → 颜色 pass 更接近连续调，网点才连续
+      softness: 0.35,
+      density: 1.0,
+      stipple: 0.0,
+      densityGamma: 1.2, // 屏幕化的明暗曲线：>1 拉开对比（暗部点更大）
+      edgeStrength: 1.6, // 粗描边
+      edgeThreshold: 0.10,
+      edgeWidth: 2.6,
+      mono: 0.0,
+      halftone: 1.0,
+      halftoneCell: 8,
+      halftoneAngle: 45,
+      boil: true, // 抖动换序：网点网格按相位重排
+      fogAmount: 0.18,
+      vignette: 0.16,
+      grain: 0.02,
+      paper: '#f6f2e8',
+      autoSway: true,
+      swayAmplitude: 12,
     },
   },
   'ink-edge': {
@@ -97,12 +148,16 @@ export const PRESETS: Record<PresetKey, Preset> = {
       edgeThreshold: 0.12,
       edgeWidth: 1.9,
       mono: 1.0,
+      halftone: 0,
+      halftoneCell: 7,
+      halftoneAngle: 45,
       boil: false,
       fogAmount: 0.4,
       vignette: 0.2,
       grain: 0.02,
       paper: '#f4efe6',
-      autoRotate: false,
+      autoSway: false,
+      swayAmplitude: 15,
     },
   },
   raw: {
@@ -117,12 +172,16 @@ export const PRESETS: Record<PresetKey, Preset> = {
       edgeThreshold: 0.3,
       edgeWidth: 1.5,
       mono: 0.0,
+      halftone: 0,
+      halftoneCell: 7,
+      halftoneAngle: 45,
       boil: false,
       fogAmount: 0.0,
       vignette: 0.0,
       grain: 0.0,
       paper: '#14161a',
-      autoRotate: true,
+      autoSway: true,
+      swayAmplitude: 15,
     },
   },
 };

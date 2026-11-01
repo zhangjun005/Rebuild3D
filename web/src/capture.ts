@@ -1,5 +1,5 @@
 /**
- * 循环录制 / 帧序列出帧（A 阶段）。
+ * 循环录制 / 帧序列出帧（A / A2 阶段）。
  *
  * 目标：**t 与 t+T 的画面必须逐位相同**，否则循环会跳帧。
  *
@@ -7,14 +7,19 @@
  * 都变成「帧索引 i」的纯函数：
  *
  *   N   = seconds × 30            （固定 30fps 输出，不跟显示器 144Hz 走）
- *   方位角  azimuth(i) = azimuth0 + 2π · turns · (i mod N) / N
+ *   摆动相位 θ(i) = 2π · swings · (i mod N) / N
+ *   方位角   azimuth(i)   = baseAzimuth + A · sin(θ(i))
+ *   俯仰角   elevation(i) = baseElevation + A·PITCH_RATIO · sin(θ(i))
  *   沸腾相位 phase(i)  = floor((i mod N) / framesPerPhase)  mod  phases
  *                        framesPerPhase = 30 / boilHz（按能整除 N 取整）
  *
- * 因为先取模再算，i = N 与 i = 0 逐位相同；而 i 从 N-1 到 0 的一步正好是
- * 2π·turns/N 的角度增量（旋转连续）、相位也按同一节奏重掷（沸腾连续）。
+ * 因为先取模再算，i = N 与 i = 0 逐位相同（sin(0) = sin(2π) = 0）；而 i 从 N-1 到 0
+ * 的一步是 sin 曲线的连续延伸（摆动连续）、相位也按同一节奏重掷（沸腾连续）。
  * 所以「N 帧、首尾相接」构成一个无缝循环：播放时显示第 0..N-1 帧，回到第 0 帧
  * 等价于播放第 N 帧，不需要额外补帧。
+ *
+ * 注意：相机是**摆动**（往返），不是绕圈。真实插画的深度只是剪影平板，
+ * 转满一圈会露馅（go/no-go 结论）。摆动幅度上限由 `params.swayAmplitude` 决定。
  *
  * 尺寸：录制时 pixelRatio 固定 1，绘图缓冲 = 目标像素（1920×1080 / 1080×1080 / 视口）。
  */
@@ -58,6 +63,11 @@ function fmt(value: number): string {
  * 导出文件名：预设名 + 关键参数 + 尺寸 + 时长，方便同一风格多组参数对比。
  * 例：stipple-print_g1.3_d0.9_p2.5_e1_1080x1080_6s.webm
  */
+/**
+ * 导出文件名：预设名 + 关键参数 + 摆动幅度 + 尺寸 + 时长，方便同风格多组参数对比。
+ * 例：stipple-print_g1.3_d0.9_p2.5_e1_sw15_1080x1080_6s.webm
+ * （g=明暗曲线 d=点画强度 p=点大小 e=描边强度 sw=摆动幅度°）
+ */
 export function buildCaptureName(
   preset: PresetKey,
   params: RenderParams,
@@ -71,6 +81,7 @@ export function buildCaptureName(
     `d${fmt(params.stipple)}`,
     `p${fmt(params.pointSize)}`,
     `e${fmt(params.edgeStrength)}`,
+    `sw${Math.round(params.swayAmplitude)}`,
     `${size.width}x${size.height}`,
     `${fmt(seconds)}s`,
   ];
@@ -134,7 +145,7 @@ export function isRecordingSupported(): boolean {
 export interface RecordOptions {
   seconds: number;
   size: OutputSize;
-  turns?: number;
+  swings?: number;
   /** 码率（bps），默认 12 Mbps */
   bitrate?: number;
   onProgress?: (done: number, total: number) => void;
@@ -160,7 +171,7 @@ export async function recordWebM(viewer: Viewer, options: RecordOptions): Promis
   viewer.setOutputSize(options.size);
   const plan = viewer.beginCapture({
     totalFrames: Math.round(options.seconds * CAPTURE_FPS),
-    turns: options.turns ?? 1,
+    swings: options.swings ?? 1,
   });
 
   try {
@@ -229,7 +240,7 @@ export interface FramesOptions {
   seconds: number;
   /** 不给就沿用当前视口尺寸 */
   size?: OutputSize;
-  turns?: number;
+  swings?: number;
   /** 额外返回 index == totalFrames 的「回绕帧」，用于自检 */
   includeWrapFrame?: boolean;
   onProgress?: (done: number, total: number) => void;
@@ -256,7 +267,7 @@ export async function captureFrames(viewer: Viewer, options: FramesOptions): Pro
   if (resized) viewer.setOutputSize(options.size ?? null);
   const plan = viewer.beginCapture({
     totalFrames: Math.round(options.seconds * CAPTURE_FPS),
-    turns: options.turns ?? 1,
+    swings: options.swings ?? 1,
   });
 
   try {
@@ -299,14 +310,14 @@ export interface SeamReport {
  */
 export async function verifySeam(
   viewer: Viewer,
-  options: { seconds: number; size?: OutputSize; turns?: number },
+  options: { seconds: number; size?: OutputSize; swings?: number },
 ): Promise<SeamReport> {
   if (viewer.isCapturing) throw new Error('正在录制/出帧，请稍候');
   const resized = options.size !== undefined;
   if (resized) viewer.setOutputSize(options.size ?? null);
   const plan = viewer.beginCapture({
     totalFrames: Math.round(options.seconds * CAPTURE_FPS),
-    turns: options.turns ?? 1,
+    swings: options.swings ?? 1,
   });
 
   try {
@@ -334,14 +345,14 @@ export async function verifySeam(
  */
 export async function captureSeamStrip(
   viewer: Viewer,
-  options: { seconds: number; size?: OutputSize; turns?: number; tileWidth?: number },
+  options: { seconds: number; size?: OutputSize; swings?: number; tileWidth?: number },
 ): Promise<{ blob: Blob; plan: CapturePlan }> {
   if (viewer.isCapturing) throw new Error('正在录制/出帧，请稍候');
   const resized = options.size !== undefined;
   if (resized) viewer.setOutputSize(options.size ?? null);
   const plan = viewer.beginCapture({
     totalFrames: Math.round(options.seconds * CAPTURE_FPS),
-    turns: options.turns ?? 1,
+    swings: options.swings ?? 1,
   });
 
   try {
