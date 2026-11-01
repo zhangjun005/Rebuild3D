@@ -1,0 +1,22 @@
+{
+  "name": "illust3d-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "illust3d 渲染层：three.js + GLSL 风格化点云渲染（点画印刷预设）",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "gen:noise": "node scripts/gen-blue-noise.mjs"
+  },
+  "dependencies": {
+    "three": "^0.169.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/three": "^0.169.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7"
+  }
+}
