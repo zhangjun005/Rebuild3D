@@ -34,6 +34,12 @@ uniform float uDensityGamma; // 明暗曲线（>1 对比更强）
 uniform vec2 uToneRange; // 自动色调范围（点云亮度 5~95 分位）
 uniform vec2 uHalftoneOffset; // 抖动换序：网点网格平移（像素）
 
+// 墨量映射（两种模式共用语义；点云模式下「结构」= 深度梯度）
+uniform float uInkSource; // 0 亮度 / 1 结构 / 2 深度
+uniform float uInkPolarity; // 0 自动 / 1 亮主体 / 2 暗主体
+uniform float uInkGain;
+uniform float uMeanLuminance;
+
 // 描边
 uniform float uEdgeStrength;
 uniform float uEdgeThreshold;
@@ -53,18 +59,46 @@ float depthAt(vec2 uv) {
   return texture2D(tDepth, uv).r;
 }
 
+/**
+ * 墨量（0 = 留纸，1 = 满墨）：三选来源 + 主体极性。
+ * 点云模式没有图像纹理，所以「结构」用**深度梯度**（褶皱/断层/边缘）代替亮度梯度。
+ */
+float inkCoverage(vec2 uv) {
+  float lum = clamp(
+    (dot(texture2D(tColor, uv).rgb, LUMA) - uToneRange.x) / max(uToneRange.y - uToneRange.x, 1e-3),
+    0.0,
+    1.0
+  );
+  float tone;
+  if (uInkSource < 0.5) {
+    tone = lum;
+  } else if (uInkSource < 1.5) {
+    vec2 e = uTexel * 1.5;
+    float gx = depthAt(uv + vec2(e.x, 0.0)) - depthAt(uv - vec2(e.x, 0.0));
+    float gy = depthAt(uv + vec2(0.0, e.y)) - depthAt(uv - vec2(0.0, e.y));
+    tone = 1.0 - clamp(length(vec2(gx, gy)) * uInkGain, 0.0, 1.0);
+  } else {
+    tone = depthAt(uv);
+  }
+  float flip = 0.0;
+  if (uInkPolarity > 1.5) {
+    flip = 0.0;
+  } else if (uInkPolarity > 0.5) {
+    flip = 1.0;
+  } else {
+    flip = step(0.62, uMeanLuminance);
+  }
+  // 结构来源不翻转：结构本身就是「该上墨的地方」，翻转会变成给平坦区上墨
+  if (flip > 0.5 && (uInkSource < 0.5 || uInkSource > 1.5)) tone = 1.0 - tone;
+  return pow(clamp(1.0 - tone, 0.0, 1.0), max(uDensityGamma, 0.1));
+}
+
 void main() {
   vec3 color = texture2D(tColor, vUv).rgb;
 
   // ── L2 半调网点 ────────────────────────────────────────────────────────────
-  // 亮度 → 网点半径：暗处点大（覆盖率高），亮处点小（留白）
-  // 自动色调范围归一化（真实插画整体偏亮时，不归一化会全场没点）
-  float lum = clamp(
-    (dot(color, LUMA) - uToneRange.x) / max(uToneRange.y - uToneRange.x, 1e-3),
-    0.0,
-    1.0
-  );
-  float tone = pow(lum, uDensityGamma);
+  // 墨量（0..1）→ 网点半径：覆盖率越高点越大；半径 ∝ sqrt(覆盖率)（印刷公式）
+  float coverage = inkCoverage(vUv);
 
   vec2 shifted = gl_FragCoord.xy + uHalftoneOffset;
   float cosA = cos(uHalftoneAngle);
@@ -75,13 +109,13 @@ void main() {
   // sqrt 让覆盖面积与明暗成线性（印刷网点半径 ∝ sqrt(覆盖率)）
   // 半径系数 0.5：tone=0 时网点刚好内切 cell（满黑），留出 0.5→0 的完整调子范围。
   // 用 0.72 会让中间调就糊成实黑（网点彼此粘连）。
-  float radius = sqrt(1.0 - tone) * 0.5;
+  float radius = sqrt(coverage) * 0.5;
   float distanceToCenter = length(cell);
   float dots = 1.0 - smoothstep(radius - 0.07, radius + 0.07, distanceToCenter);
 
   // 只对「有点云的地方」做网点：背景保持纯纸色（墨/纸系风格里空背景就是纸）
-  float coverage = 1.0 - smoothstep(0.97, 0.997, depthAt(vUv));
-  vec3 halftoneColor = mix(uPaper, mix(uPaper, uInk, dots), coverage);
+  float geometryMask = 1.0 - smoothstep(0.97, 0.997, depthAt(vUv));
+  vec3 halftoneColor = mix(uPaper, mix(uPaper, uInk, dots), geometryMask);
   vec3 outCol = mix(color, halftoneColor, clamp(uHalftoneStrength, 0.0, 1.0));
 
   // ── L2 粗描边：sobel on 平滑深度（与点画印刷同一套）──────────────────────

@@ -5,8 +5,27 @@
  */
 
 export interface RenderParams {
+  // ── 输出模式（第一层：要不要立体）──
+  /**
+   * 'image' = 纯图像风格化：原图当纹理，复用半调/排线/点画合成 pass，**不碰深度**。
+   * 线稿/五官/装饰完整保留，永远不难看，全部在浏览器内完成。
+   * 'cloud' = 点云模式：有视差/立体感，但受深度分辨率限制（线稿在深度里不存在）。
+   */
+  renderMode: 'image' | 'cloud';
+
+  // ── 墨量映射（两种模式共用）──
+  /**
+   * 墨量来源：0 = 按亮度（传统，适合深色主体）；1 = **按局部结构（默认）**，局部梯度大才上墨，
+   * 平坦区留纸 → 修「浅色主体消失、背景抢戏」；2 = 按深度（强调层次，点云模式有效）。
+   */
+  inkSource: number;
+  /** 主体极性：0 = 自动（按图像亮度分布判断），1 = 亮主体，2 = 暗主体 */
+  inkPolarity: number;
+  /** 结构增益：按局部结构时的灵敏度（越大越容易在弱纹理上上墨） */
+  inkGain: number;
+
   // ── L1 基元层 ──
-  /** 点大小：参考深度处的屏幕像素直径 */
+  /** 点大小：参考深度处的屏幕像素直径（图像模式下隐藏） */
   pointSize: number;
   /** 软边：0 = 硬边圆点，1 = 最软 */
   softness: number;
@@ -14,8 +33,10 @@ export interface RenderParams {
   density: number;
 
   // ── L2 风格层 ──
-  /** 点画强度 0..1 */
+  /** 点画强度 0..1（图像模式 = 屏幕空间 stipple 的墨量上限） */
   stipple: number;
+  /** 图像模式的点画网点尺度（像素，2~10）：blue noise 打连续图像，不会摩尔纹 */
+  stippleScale: number;
   /** 明暗 → 密度曲线 */
   densityGamma: number;
   /** 描边强度 0..2 */
@@ -65,13 +86,23 @@ export interface RenderParams {
 
   // ── 相机 ──
   /**
-   * 自动**摆动**（不是转圈）：真实插画深度只是剪影，转满一圈会露馅（go/no-go 结论）。
-   * 摆动是往返运动，录制时一个周期 T 内走完整来回，state(T) ≡ state(0) 仍成立。
+   * 相机运动模式：`true` = **视差平移**（默认，3D Photo / Live2D 做法），`false` = 旋转摆动。
+   *
+   * 平板数据（真实插画的深度）**不能旋转**：哪怕 1°，矩形的边就不再平行于画面，
+   * 眼睛立刻读成"一块斜着的板"。视差平移只改变机位、不改变朝向 →
+   * 近层/远层错动产生深度感，而所有平板始终平行于画面。
    */
+  parallaxMode: boolean;
+  /**
+   * 视差幅度（场景宽度的百分比，0~15，默认 4）。
+   * 相机横移量 = 场景宽度 × pct%；0 = 画面完全静止（等于原图）。
+   */
+  parallaxAmount: number;
+  /** 自动运动开关（视差模式下来回平移；旋转模式下来回摆动） */
   autoSway: boolean;
   /**
-   * 摆动 / 环绕的幅度上限（度）：方位角与俯仰角都限制在取景基准的 ±amp 内。
-   * 0 = 锁死正面（只用来看平面剪影）；默认 15（±15° 刚好不露主体板边缘）。
+   * 旋转模式下的摆动幅度上限（度）：仅 `parallaxMode = false` 时生效。
+   * 0 = 锁死正面；默认 15。
    */
   swayAmplitude: number;
   /**
@@ -114,6 +145,13 @@ const DEFAULTS = {
   posterizeLevels: 4,
   ink: '#1b1a17',
   threeQuarterView: false,
+  parallaxMode: true,
+  parallaxAmount: 4,
+  renderMode: 'cloud',
+  inkSource: 1,
+  inkPolarity: 0,
+  inkGain: 8,
+  stippleScale: 4,
 } as const;
 
 /**

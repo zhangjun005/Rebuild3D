@@ -82,13 +82,21 @@ async function boot(): Promise<void> {
     hud: hudElement,
     params: viewer.params,
     activePreset: DEFAULT_PRESET,
-    onChange: () => viewer.setParams(viewer.params),
+    onChange: () => {
+      viewer.setParams(viewer.params);
+      // 切到点云模式但还没有这份图的点云 → 懒加载（图像模式不需要 Go）
+      if (viewer.params.renderMode === 'cloud' && lastFile && cloudForFile !== lastFile) {
+        void generateCloud();
+      }
+    },
     onPreset: (key) => viewer.applyPreset(key),
     onExport: (request) => {
       void runExport(request);
     },
     onUpload: (file) => {
-      void handleUpload(file);
+      lastFile = file;
+      cloudForFile = null;
+      void showImage(file);
     },
     onLoadSample: () => {
       void reloadSample();
@@ -217,14 +225,87 @@ async function boot(): Promise<void> {
     return next.count;
   };
 
-  // ── 真实插画 → POST /api/infer → ILC1 → 渲染 ──────────────────────────────
+  // ── 上传插画：图像模式（浏览器内，不请求 Go）当默认；点云模式按需懒加载 ──
   let busy = false;
-  async function handleUpload(file: File): Promise<void> {
+  let lastFile: File | null = null;
+  let cloudForFile: File | null = null;
+
+  /** 把文件变成纹理 + 平均亮度（判断主体极性"自动"用）。纯浏览器，不碰 Go。 */
+  const loadImageTexture = async (
+    file: File,
+  ): Promise<{ texture: THREE.Texture; aspect: number; meanLuminance: number }> => {
+    const bitmap = await createImageBitmap(file);
+    const texture = new THREE.Texture(bitmap);
+    texture.colorSpace = THREE.NoColorSpace;
+    texture.flipY = false; // ImageBitmap 已经是屏幕方向，再翻一次会上下颠倒
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = false;
+    texture.needsUpdate = true;
+    // 缩到 64px 算平均亮度（只用于主体极性的"自动"判定）
+    const probe = document.createElement('canvas');
+    probe.width = 64;
+    probe.height = 64;
+    const context = probe.getContext('2d');
+    let meanLuminance = 0.5;
+    if (context) {
+      context.drawImage(bitmap, 0, 0, 64, 64);
+      const data = context.getImageData(0, 0, 64, 64).data;
+      let sum = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        sum += (0.299 * (data[i] ?? 0) + 0.587 * (data[i + 1] ?? 0) + 0.114 * (data[i + 2] ?? 0)) / 255;
+      }
+      meanLuminance = sum / (data.length / 4);
+    }
+    return { texture, aspect: bitmap.width / Math.max(bitmap.height, 1), meanLuminance };
+  };
+
+  /** 上传即出图：图像模式，完全不依赖深度质量 */
+  async function showImage(file: File): Promise<void> {
+    panel.setInputBusy(true);
+    try {
+      panel.setInputStatus(`读取 ${file.name}（${(file.size / 1048576).toFixed(1)} MB）…`);
+      const { texture, aspect, meanLuminance } = await loadImageTexture(file);
+      viewer.params.renderMode = 'image';
+      // 图像模式默认「按局部结构」：平坦区留纸、线稿/五官/褶皱上墨（修主次颠倒）
+      viewer.params.inkSource = 1;
+      // 真实插画默认铜版画：排线能把平板压出层次，duotone 又贡献明暗分离，
+      // 是「信息不足」数据上最抗跌的一档（点画/半调依赖点密度表达一切，最先崩）。
+      viewer.applyPreset('engraving');
+      viewer.params.renderMode = 'image';
+      viewer.setParams(viewer.params);
+      viewer.setImage(texture, aspect, meanLuminance);
+      panel.setPreset('engraving');
+      panel.setInputStatus(
+        [
+          `图像模式就绪：${file.name}`,
+          `平均亮度 ${meanLuminance.toFixed(2)}（主体极性自动 → ${meanLuminance > 0.62 ? '亮主体' : '暗主体'}）`,
+          '线稿/五官/装饰完整保留；想加立体感再切「点云模式」（会请求 Go 推理）',
+        ].join('\n'),
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[illust3d] 图像载入失败', error);
+      panel.setInputStatus(`图像载入失败：${message}`);
+    } finally {
+      panel.setInputBusy(false);
+    }
+  }
+
+  // ── 点云模式：POST /api/infer → ILC1 → 渲染（按需，懒加载）──────────────────
+  async function generateCloud(): Promise<void> {
+    const file = lastFile;
+    if (!file) {
+      panel.setInputStatus('先上传一张插画，再切点云模式');
+      viewer.params.renderMode = 'image';
+      viewer.setParams(viewer.params);
+      panel.sync();
+      return;
+    }
     if (busy) return;
     busy = true;
     panel.setInputBusy(true);
     try {
-      panel.setInputStatus(`读取 ${file.name}（${(file.size / 1048576).toFixed(1)} MB）…`);
       const health = await fetchHealth();
       if (!health) {
         throw new Error('连不上 Go 服务 /api/health（用 out\\illust3d.exe -web-dist web/dist 起服务）');
@@ -253,19 +334,30 @@ async function boot(): Promise<void> {
         onPhase: (phase) => panel.setInputStatus(phase),
       });
       applyCloud(result.cloud, `${file.name} · ${result.metrics.pointCount.toLocaleString('en-US')} 点`);
+      cloudForFile = file;
+      // 点云模式：深度里没有"局部结构"信息（平坦板），墨量来源切回按亮度
+      if (viewer.params.inkSource === 1) {
+        viewer.params.inkSource = 0;
+        viewer.setParams(viewer.params);
+        panel.sync();
+      }
       const m = result.metrics;
       panel.setInputStatus(
         [
-          `完成：${m.pointCount.toLocaleString('en-US')} 点 · 深度 ${m.depthWidth}×${m.depthHeight}`,
+          `点云模式：${m.pointCount.toLocaleString('en-US')} 点 · 深度 ${m.depthWidth}×${m.depthHeight}`,
           `推理 ${m.inferMs.toFixed(0)}ms · 几何 ${m.geometryMs.toFixed(0)}ms · 合计 ${m.totalMs.toFixed(0)}ms`,
-          `ILC1 ${(result.buffer.byteLength / 1048576).toFixed(2)} MB`,
+          `ILC1 ${(result.buffer.byteLength / 1048576).toFixed(2)} MB · 线稿在深度里不存在，只有剪影`,
         ].join('\n'),
       );
       console.info('[illust3d] 推理完成', m);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error('[illust3d] 插画推理失败', error);
-      panel.setInputStatus(`失败：${message}`);
+      panel.setInputStatus(`点云模式失败：${message}`);
+      // 失败就退回图像模式，别让用户看到一张坏图
+      viewer.params.renderMode = 'image';
+      viewer.setParams(viewer.params);
+      panel.sync();
     } finally {
       busy = false;
       panel.setInputBusy(false);
@@ -287,7 +379,7 @@ async function boot(): Promise<void> {
   // 全窗口拖拽上传
   const dropOverlay = document.createElement('div');
   dropOverlay.className = 'drop-overlay';
-  dropOverlay.textContent = '松手上传插画 → 深度 → 点云';
+  dropOverlay.textContent = '松手上传插画 → 图像模式直接出图（线稿保留）';
   document.body.append(dropOverlay);
   let dragDepth = 0;
   const hasFiles = (event: DragEvent): boolean =>
@@ -311,7 +403,11 @@ async function boot(): Promise<void> {
     dragDepth = 0;
     dropOverlay.classList.remove('active');
     const file = event.dataTransfer?.files?.[0];
-    if (file) void handleUpload(file);
+    if (file) {
+      lastFile = file;
+      cloudForFile = null;
+      void showImage(file);
+    }
   });
 
   window.illust3d = {

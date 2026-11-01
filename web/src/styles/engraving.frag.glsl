@@ -33,6 +33,12 @@ uniform float uDensityGamma; // 调子曲线
 uniform vec2 uToneRange; // 自动色调范围（点云亮度 5~95 分位）
 uniform vec2 uScreenOffset; // 抖动换序（像素）
 
+// 墨量映射（两种模式共用语义；点云模式下「结构」= 深度梯度）
+uniform float uInkSource; // 0 亮度 / 1 结构 / 2 深度
+uniform float uInkPolarity; // 0 自动 / 1 亮主体 / 2 暗主体
+uniform float uInkGain;
+uniform float uMeanLuminance;
+
 // 描边
 uniform float uEdgeStrength;
 uniform float uEdgeThreshold;
@@ -52,6 +58,40 @@ float depthAt(vec2 uv) {
   return texture2D(tDepth, uv).r;
 }
 
+/**
+ * 墨量（0 = 留纸，1 = 满墨）：三选来源 + 主体极性。
+ * 点云模式没有图像纹理，所以「结构」用**深度梯度**（褶皱/断层/边缘）代替亮度梯度。
+ */
+float inkCoverage(vec2 uv) {
+  float lum = clamp(
+    (dot(texture2D(tColor, uv).rgb, LUMA) - uToneRange.x) / max(uToneRange.y - uToneRange.x, 1e-3),
+    0.0,
+    1.0
+  );
+  float tone;
+  if (uInkSource < 0.5) {
+    tone = lum;
+  } else if (uInkSource < 1.5) {
+    vec2 e = uTexel * 1.5;
+    float gx = depthAt(uv + vec2(e.x, 0.0)) - depthAt(uv - vec2(e.x, 0.0));
+    float gy = depthAt(uv + vec2(0.0, e.y)) - depthAt(uv - vec2(0.0, e.y));
+    tone = 1.0 - clamp(length(vec2(gx, gy)) * uInkGain, 0.0, 1.0);
+  } else {
+    tone = depthAt(uv);
+  }
+  float flip = 0.0;
+  if (uInkPolarity > 1.5) {
+    flip = 0.0;
+  } else if (uInkPolarity > 0.5) {
+    flip = 1.0;
+  } else {
+    flip = step(0.62, uMeanLuminance);
+  }
+  // 结构来源不翻转：结构本身就是「该上墨的地方」，翻转会变成给平坦区上墨
+  if (flip > 0.5 && (uInkSource < 0.5 || uInkSource > 1.5)) tone = 1.0 - tone;
+  return pow(clamp(1.0 - tone, 0.0, 1.0), max(uDensityGamma, 0.1));
+}
+
 /** 一层排线的覆盖遮罩：沿 angle 方向、间距 spacing 的线条（1 = 有墨） */
 float hatchLayer(vec2 p, float angle, float spacing) {
   float c = cos(angle);
@@ -66,52 +106,47 @@ float hatchLayer(vec2 p, float angle, float spacing) {
 
 void main() {
   vec3 color = texture2D(tColor, vUv).rgb;
-  // 自动色调范围归一化（真实插画整体偏亮时，不归一化会全场没线）
-  float lum = clamp(
-    (dot(color, LUMA) - uToneRange.x) / max(uToneRange.y - uToneRange.x, 1e-3),
-    0.0,
-    1.0
-  );
 
-  // ── 调子 → posterize ──────────────────────────────────────────────────────
-  float tone = pow(clamp(lum, 0.0, 1.0), uDensityGamma);
+  // ── 墨量 → posterize ──────────────────────────────────────────────────────
+  // inkLevel：0 = 留纸，1 = 满墨（三选来源 + 主体极性，与图像模式同一套语义）
+  float inkAmount = inkCoverage(vUv);
   float levels = clamp(uPosterizeLevels, 2.0, 6.0);
-  float quantized = min(floor(tone * levels), levels - 1.0) / max(levels - 1.0, 1.0);
+  float quantized = min(floor(inkAmount * levels), levels - 1.0) / max(levels - 1.0, 1.0);
 
-  // ── 3 层交叉排线：层数随暗度增加（越暗叠加越多层）───────────────────────
+  // ── 3 层交叉排线：层数随墨量增加（越暗叠加越多层）───────────────────────
   vec2 p = gl_FragCoord.xy + uScreenOffset;
   float ink = 0.0;
   float layers = clamp(uHatchLayers, 1.0, 4.0);
 
-  // 第 1 层：中间调就开始（阈值 0.86）
-  ink = max(ink, hatchLayer(p, uHatchAngle, uHatchSpacing) * step(quantized, 0.90));
-  // 第 2 层：更暗的档（阈值 0.62），角度 +45°，线更密一点
+  // 第 1 层：有墨就开始（墨量 ≥ 1 档）
+  ink = max(ink, hatchLayer(p, uHatchAngle, uHatchSpacing) * step(0.1, quantized));
+  // 第 2 层：中调（墨量 ≥ 2 档），角度 +45°，线更密一点
   if (layers >= 2.0) {
     ink = max(
       ink,
-      hatchLayer(p, uHatchAngle + 0.7854, uHatchSpacing * 0.92) * step(quantized, 0.62)
+      hatchLayer(p, uHatchAngle + 0.7854, uHatchSpacing * 0.92) * step(0.34, quantized)
     );
   }
-  // 第 3 层：暗部（阈值 0.38），角度 +90°
+  // 第 3 层：暗部（墨量 ≥ 3 档），角度 +90°
   if (layers >= 3.0) {
     ink = max(
       ink,
-      hatchLayer(p, uHatchAngle + 1.5708, uHatchSpacing * 0.84) * step(quantized, 0.35)
+      hatchLayer(p, uHatchAngle + 1.5708, uHatchSpacing * 0.84) * step(0.62, quantized)
     );
   }
   // 第 4 层（可选）：最暗处，角度 +135°
   if (layers >= 4.0) {
     ink = max(
       ink,
-      hatchLayer(p, uHatchAngle + 2.3562, uHatchSpacing * 0.76) * step(quantized, 0.2)
+      hatchLayer(p, uHatchAngle + 2.3562, uHatchSpacing * 0.76) * step(0.9, quantized)
     );
   }
-  // 最暗一档压成实墨（版画的"暗部实心"）
-  ink = max(ink, step(quantized, 0.06));
+  // 满墨处压成实墨（版画的"暗部实心"）
+  ink = max(ink, step(0.94, quantized));
 
   // 只对「有点云的地方」上墨：背景保持纯纸色
-  float coverage = 1.0 - smoothstep(0.97, 0.997, depthAt(vUv));
-  vec3 engraved = mix(uPaper, uInk, ink * coverage);
+  float geometryMask = 1.0 - smoothstep(0.97, 0.997, depthAt(vUv));
+  vec3 engraved = mix(uPaper, uInk, ink * geometryMask);
   vec3 outCol = mix(color, engraved, clamp(uEngravingStrength, 0.0, 1.0));
 
   // ── 轮廓线：sobel on 平滑深度（铜版画的刻线）──────────────────────────────

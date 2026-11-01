@@ -21,6 +21,8 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import depthFrag from './styles/depth.frag.glsl?raw';
 import engravingFrag from './styles/engraving.frag.glsl?raw';
 import halftoneFrag from './styles/halftone.frag.glsl?raw';
+import imagePrintFrag from './styles/image-print.frag.glsl?raw';
+import imageQuadFrag from './styles/image-quad.frag.glsl?raw';
 import depthVert from './styles/depth.vert.glsl?raw';
 import pointsVert from './styles/points.vert.glsl?raw';
 import postEdgeFrag from './styles/post-edge.frag.glsl?raw';
@@ -75,6 +77,14 @@ const ELEVATION_MAX_DEG = 86;
 const LIVE_SWAY_PERIOD = 8;
 /** 摆动幅度的参数上限（度） */
 const SWAY_MAX_DEG = 45;
+/** 视差幅度的参数上限（场景宽度百分比） */
+const PARALLAX_MAX_PERCENT = 15;
+
+/**
+ * 图像模式的描边阈值缩放：uEdgeThreshold 的默认值是按**深度梯度**（0..1 归一化）定的，
+ * 图像亮度梯度是另一个尺度（线稿 1~2px、对比度各不相同）→ 乘一个系数共用同一个参数。
+ */
+const IMAGE_EDGE_THRESHOLD_SCALE = 0.4;
 
 /**
  * 取景基准方向。
@@ -146,7 +156,11 @@ export interface CapturePlan {
   totalFrames: number;
   /** 一个循环里摆动几个来回 */
   swings: number;
-  /** 摆动幅度（度）——录制时的快照，用于文件名/自检 */
+  /** 运动模式快照：true = 视差平移，false = 旋转摆动 */
+  parallaxMode: boolean;
+  /** 视差幅度（场景宽度百分比）——parallaxMode 时有效 */
+  parallaxPercent: number;
+  /** 旋转摆动幅度（度）——!parallaxMode 时有效 */
   swayAmplitudeDeg: number;
   framesPerPhase: number;
   phases: number;
@@ -158,9 +172,12 @@ export interface CapturePlan {
 
 interface CaptureState extends CapturePlan {
   distance: number;
+  /** 视差幅度的世界尺寸 = 场景宽度 × percent% */
+  parallaxWorld: number;
   target: THREE.Vector3;
   savedPosition: THREE.Vector3;
   savedTarget: THREE.Vector3;
+  savedQuaternion: THREE.Quaternion;
 }
 
 type NumericUniform = THREE.IUniform<number>;
@@ -215,8 +232,16 @@ interface CompositeUniforms {
   uBoilFlicker: NumericUniform;
 }
 
+/** 墨量映射（两种模式共用）：来源/极性/增益/平均亮度 */
+interface InkUniforms {
+  uInkSource: NumericUniform;
+  uInkPolarity: NumericUniform;
+  uInkGain: NumericUniform;
+  uMeanLuminance: NumericUniform;
+}
+
 /** 半调漫画的合成 pass uniform（多了网点相关的那几个） */
-interface HalftoneUniforms extends CompositeUniforms {
+interface HalftoneUniforms extends CompositeUniforms, InkUniforms {
   uPaper: THREE.IUniform<THREE.Color>;
   uHalftoneStrength: NumericUniform;
   uHalftoneCell: NumericUniform;
@@ -227,7 +252,7 @@ interface HalftoneUniforms extends CompositeUniforms {
 }
 
 /** 铜版画的合成 pass uniform（排线相关） */
-interface EngravingUniforms extends CompositeUniforms {
+interface EngravingUniforms extends CompositeUniforms, InkUniforms {
   uPaper: THREE.IUniform<THREE.Color>;
   uEngravingStrength: NumericUniform;
   uHatchLayers: NumericUniform;
@@ -297,8 +322,29 @@ export class Viewer {
   private readonly compositeMaterial: THREE.ShaderMaterial;
   /** 半调漫画的合成 pass（params.halftone > 0 时使用） */
   private readonly halftoneMaterial: THREE.ShaderMaterial;
+  /** 墨量映射 uniform（半调/排线/图像模式共用同一份值） */
+  private readonly inkUniforms: InkUniforms;
   /** 铜版画的合成 pass（params.engraving > 0 时使用） */
   private readonly engravingMaterial: THREE.ShaderMaterial;
+  /**
+   * 图像模式（不碰深度）：原图 → 全屏 quad → 图像合成 pass。
+   * 第一层是「要不要立体」的选择，和画风预设正交。
+   */
+  private readonly imageQuadMaterial: THREE.ShaderMaterial;
+  private readonly imagePrintMaterial: THREE.ShaderMaterial;
+  private readonly imageQuadUniforms: {
+    tImage: THREE.IUniform<THREE.Texture | null>;
+    uImageScale: THREE.IUniform<THREE.Vector2>;
+    uPaper: THREE.IUniform<THREE.Color>;
+  };
+  private readonly imagePrintUniforms: Record<string, THREE.IUniform>;
+  /** 当前图像（null = 没上传过，图像模式不可用） */
+  private imageTexture: THREE.Texture | null = null;
+  private imageAspect = 1;
+  /** 图像平均亮度（主体极性"自动"用） */
+  private imageMeanLuminance = 0.5;
+  /** 图像占屏幕宽/高的比例（contain 摆放） */
+  private readonly imageScale = new THREE.Vector2(1, 1);
 
   private readonly pointUniforms: PointUniforms;
   private readonly depthUniforms: DepthUniforms;
@@ -348,6 +394,19 @@ export class Viewer {
   private baseElevation = 0;
   /** 实时摆动时钟（秒，mod LIVE_SWAY_PERIOD） */
   private swayClock = 0;
+  /**
+   * 视差模式的基准位姿：位置 + **朝向**（朝向在整个视差运动中保持不变）。
+   * 旋转模式的摆动会改朝向；视差模式只平移相机与 target，四元数原样复用。
+   */
+  private readonly parallaxBasePosition = new THREE.Vector3();
+  private readonly parallaxBaseTarget = new THREE.Vector3();
+  private readonly parallaxBaseQuaternion = new THREE.Quaternion();
+  private readonly parallaxRight = new THREE.Vector3(1, 0, 0);
+  private readonly parallaxUp = new THREE.Vector3(0, 1, 0);
+  /** 场景宽度（= 2×核心半径）：视差幅度按它的百分比算 */
+  private sceneWidth = 1;
+  /** 当前运动模式是否视差（用于检测开关变化） */
+  private parallaxMode = true;
   /** 当前点云（基准视角切换时要重新取景） */
   private cloudGeometry: THREE.BufferGeometry | null = null;
   private cloudPosition: THREE.BufferAttribute | null = null;
@@ -504,6 +563,12 @@ export class Viewer {
     });
 
     // 半调漫画的合成 pass：同一份 tColor/tDepth，多做一次屏幕空间网点化
+    this.inkUniforms = {
+      uInkSource: { value: this.params.inkSource },
+      uInkPolarity: { value: this.params.inkPolarity },
+      uInkGain: { value: this.params.inkGain },
+      uMeanLuminance: { value: 0.5 },
+    };
     this.halftoneUniforms = {
       ...this.compositeUniforms,
       uPaper: this.pointUniforms.uPaper,
@@ -513,6 +578,7 @@ export class Viewer {
       uDensityGamma: { value: this.params.densityGamma },
       uHalftoneOffset: { value: new THREE.Vector2() },
       uToneRange: { value: new THREE.Vector2(0, 1) },
+      ...this.inkUniforms,
     };
     this.halftoneMaterial = new THREE.ShaderMaterial({
       name: 'halftone-manga/composite',
@@ -535,12 +601,69 @@ export class Viewer {
       uDensityGamma: { value: this.params.densityGamma },
       uScreenOffset: { value: new THREE.Vector2() },
       uToneRange: { value: new THREE.Vector2(0, 1) },
+      ...this.inkUniforms,
     };
     this.engravingMaterial = new THREE.ShaderMaterial({
       name: 'engraving/composite',
       uniforms: this.engravingUniforms as unknown as Record<string, THREE.IUniform>,
       vertexShader: quadVert,
       fragmentShader: engravingFrag,
+      depthTest: false,
+      depthWrite: false,
+    });
+
+    // ── 图像模式（不碰深度）：原图 quad + 图像合成 pass ─────────────────────
+    this.imageQuadUniforms = {
+      tImage: { value: null },
+      uImageScale: { value: this.imageScale },
+      uPaper: this.pointUniforms.uPaper,
+    };
+    this.imageQuadMaterial = new THREE.ShaderMaterial({
+      name: 'image/quad',
+      uniforms: this.imageQuadUniforms as unknown as Record<string, THREE.IUniform>,
+      vertexShader: quadVert,
+      fragmentShader: imageQuadFrag,
+      depthTest: false,
+      depthWrite: false,
+    });
+
+    this.imagePrintUniforms = {
+      tColor: { value: null },
+      tNoise: { value: blueNoise },
+      uTexel: { value: new THREE.Vector2(1, 1) },
+      uPaper: this.pointUniforms.uPaper,
+      uInk: this.pointUniforms.uInk,
+      uStyle: { value: 0 },
+      uMono: { value: 1 },
+      uDensityGamma: { value: this.params.densityGamma },
+      uStippleStrength: { value: this.params.stipple },
+      uStippleScale: { value: this.params.stippleScale },
+      uHalftoneStrength: { value: this.params.halftone },
+      uHalftoneCell: { value: this.params.halftoneCell },
+      uHalftoneAngle: { value: THREE.MathUtils.degToRad(this.params.halftoneAngle) },
+      uHatchStrength: { value: this.params.engraving },
+      uHatchLayers: { value: this.params.hatchLayers },
+      uHatchSpacing: { value: this.params.hatchSpacing },
+      uHatchAngle: { value: THREE.MathUtils.degToRad(this.params.hatchAngle) },
+      uScreenOffset: { value: new THREE.Vector2() },
+      uInkSource: { value: this.params.inkSource },
+      uInkPolarity: { value: this.params.inkPolarity },
+      uInkGain: { value: this.params.inkGain },
+      uMeanLuminance: { value: 0.5 },
+      uEdgeStrength: { value: this.params.edgeStrength },
+      uEdgeThreshold: { value: this.params.edgeThreshold },
+      uEdgeScale: { value: IMAGE_EDGE_THRESHOLD_SCALE },
+      uEdgeWidth: { value: this.params.edgeWidth },
+      uBoilJitter: { value: new THREE.Vector2() },
+      uBoilFlicker: { value: 0 },
+      uVignette: { value: this.params.vignette },
+      uGrain: { value: this.params.grain },
+    };
+    this.imagePrintMaterial = new THREE.ShaderMaterial({
+      name: 'image/print',
+      uniforms: this.imagePrintUniforms,
+      vertexShader: quadVert,
+      fragmentShader: imagePrintFrag,
       depthTest: false,
       depthWrite: false,
     });
@@ -642,6 +765,9 @@ export class Viewer {
     this.poseFromOffsets(0, 0, options.preserveDistance ?? fitDistance);
     this.applySwayLimits();
     this.controls.update();
+    // 记录视差基准位姿（位置 + 朝向）；场景宽度供视差幅度换算
+    this.sceneWidth = Math.max(radius * 2, 1e-6);
+    this.captureParallaxBase();
 
     this.frameInfo = {
       center: center.clone(),
@@ -854,6 +980,87 @@ export class Viewer {
     );
   }
 
+  // ── 图像模式 ────────────────────────────────────────────────────────────
+  /**
+   * 载入一张「已经是成品画面」的图（图像模式用）：不经过深度，直接用原图做风格化。
+   * meanLuminance 用来判断主体极性"自动"应该按亮主体还是暗主体处理。
+   */
+  setImage(texture: THREE.Texture, aspect: number, meanLuminance: number): void {
+    this.imageTexture?.dispose();
+    this.imageTexture = texture;
+    this.imageAspect = aspect > 0 ? aspect : 1;
+    this.imageMeanLuminance = meanLuminance;
+    this.imageQuadUniforms.tImage.value = texture;
+    this.imagePrintUniforms.uMeanLuminance.value = meanLuminance;
+    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+    this.updateImageScale(size.x / Math.max(size.y, 1));
+    if (!this.capture) this.renderFrame();
+  }
+
+  /** 图像模式下是否可用（有图 + 模式是 image） */
+  get hasImage(): boolean {
+    return this.imageTexture !== null;
+  }
+
+  /** 图像 contain 摆放：计算图像占屏幕宽/高的比例 */
+  private updateImageScale(viewAspect: number): void {
+    if (this.imageAspect >= viewAspect) {
+      this.imageScale.set(1, viewAspect / Math.max(this.imageAspect, 1e-6));
+    } else {
+      this.imageScale.set(this.imageAspect / Math.max(viewAspect, 1e-6), 1);
+    }
+    this.imageQuadUniforms.uImageScale.value.copy(this.imageScale);
+  }
+
+  /** 当前是否走图像模式（没上传图时自动退回点云模式） */
+  private useImageMode(): boolean {
+    return this.params.renderMode === 'image' && this.imageTexture !== null;
+  }
+
+  /** 视差幅度（世界单位）：场景宽度 × 百分比 */
+  private parallaxAmplitude(): number {
+    const percent = THREE.MathUtils.clamp(this.params.parallaxAmount, 0, PARALLAX_MAX_PERCENT);
+    return (percent / 100) * this.sceneWidth;
+  }
+
+  /**
+   * 记录当前的「视差基准位姿」：位置 + 朝向 + 相机的右/上基向量。
+   *
+   * 视差模式下相机只做平移，**朝向固定** —— 这是整个交互成立的关键：
+   * 平板永远平行于画面，近层/远层的屏幕位移差（视差）提供深度感。
+   */
+  private captureParallaxBase(): void {
+    this.parallaxBasePosition.copy(this.camera.position);
+    this.parallaxBaseTarget.copy(this.controls.target);
+    this.parallaxBaseQuaternion.copy(this.camera.quaternion);
+    this.parallaxRight.set(1, 0, 0).applyQuaternion(this.parallaxBaseQuaternion);
+    this.parallaxUp.set(0, 1, 0).applyQuaternion(this.parallaxBaseQuaternion);
+  }
+
+  /**
+   * 视差位姿：相机与 target 同时平移 (dx, dy)，**四元数原样保留**（朝向不变）。
+   *
+   * 注意不能用 `lookAt(0,0,0)`：相机平移后仍看向原点 = 又变成旋转了。
+   * 看向"同样偏移的点"才等价于纯平移。
+   */
+  private poseParallax(dx: number, dy: number): void {
+    this.camera.position
+      .copy(this.parallaxBasePosition)
+      .addScaledVector(this.parallaxRight, dx)
+      .addScaledVector(this.parallaxUp, dy);
+    this.camera.quaternion.copy(this.parallaxBaseQuaternion);
+    this.controls.target
+      .copy(this.parallaxBaseTarget)
+      .addScaledVector(this.parallaxRight, dx)
+      .addScaledVector(this.parallaxUp, dy);
+    this.camera.updateMatrixWorld();
+  }
+
+  /** 手动平移后把基准位姿更新到当前（视差模式下拖动 = 平移） */
+  private syncParallaxBaseFromCamera(): void {
+    this.captureParallaxBase();
+  }
+
   /**
    * 把 OrbitControls 的方位/俯仰限制在「取景基准 ± 摆动幅度」内。
    *
@@ -895,6 +1102,31 @@ export class Viewer {
     );
     this.controls.update();
     if (!this.capture) this.renderFrame();
+  }
+
+  /**
+   * 视差模式：直接设定当前横移量（场景宽度百分比）。给自动化截图 / 预设立场用。
+   * 内部走 poseParallax → 朝向不变。
+   */
+  setParallaxOffset(percent: number): void {
+    if (!this.params.parallaxMode) {
+      this.params.parallaxMode = true;
+      this.setParams(this.params);
+    }
+    const world = (percent / 100) * this.sceneWidth;
+    this.poseParallax(world, 0.5 * world);
+    if (!this.capture) this.renderFrame();
+  }
+
+  /** 当前视差横移量（场景宽度百分比） */
+  getParallaxOffset(): number {
+    const dx = this.camera.position.distanceTo(this.parallaxBasePosition);
+    return this.sceneWidth > 0 ? (dx / this.sceneWidth) * 100 : 0;
+  }
+
+  /** 场景宽度（= 2×核心半径），视差幅度的基准 */
+  get sceneWidthValue(): number {
+    return this.sceneWidth;
   }
 
   /** 当前相机相对取景基准的方位/俯仰偏移（度），给自检/统计用 */
@@ -952,9 +1184,22 @@ export class Viewer {
     this.applyParams();
   }
 
-  /** 应用某个预设 */
+  /**
+   * 应用某个预设（画风）。
+   * 预设只决定「画风 / 墨量语义」，不决定**「要不要立体」**——所以保留当前的 renderMode：
+   * 在图像模式里点预设不该被踢回点云模式（这一层是独立的）。
+   */
   applyPreset(key: PresetKey): void {
-    this.setParams(cloneParams(PRESETS[key].params));
+    const renderMode = this.params.renderMode;
+    const inkSource = this.params.inkSource;
+    const inkPolarity = this.params.inkPolarity;
+    const inkGain = this.params.inkGain;
+    const next = cloneParams(PRESETS[key].params);
+    next.renderMode = renderMode;
+    next.inkSource = inkSource;
+    next.inkPolarity = inkPolarity;
+    next.inkGain = inkGain;
+    this.setParams(next);
   }
 
   private applyParams(): void {
@@ -974,7 +1219,15 @@ export class Viewer {
     this.pointUniforms.uToneLow.value = this.toneLow;
     this.pointUniforms.uToneHigh.value = this.toneHigh;
     this.halftoneUniforms.uToneRange.value.set(this.toneLow, this.toneHigh);
+    this.halftoneUniforms.uInkSource.value = p.inkSource;
+    this.halftoneUniforms.uInkPolarity.value = p.inkPolarity;
+    this.halftoneUniforms.uInkGain.value = p.inkGain;
+    this.halftoneUniforms.uMeanLuminance.value = this.imageMeanLuminance;
     this.engravingUniforms.uToneRange.value.set(this.toneLow, this.toneHigh);
+    this.engravingUniforms.uInkSource.value = p.inkSource;
+    this.engravingUniforms.uInkPolarity.value = p.inkPolarity;
+    this.engravingUniforms.uInkGain.value = p.inkGain;
+    this.engravingUniforms.uMeanLuminance.value = this.imageMeanLuminance;
 
     this.compositeUniforms.uEdgeStrength.value = p.edgeStrength;
     this.compositeUniforms.uEdgeThreshold.value = p.edgeThreshold;
@@ -996,8 +1249,46 @@ export class Viewer {
     this.engravingUniforms.uPosterizeLevels.value = p.posterizeLevels;
     this.engravingUniforms.uDensityGamma.value = p.densityGamma;
 
+    // ── 图像模式：同一套墨/纸外观参数 ──────────────────────────────────────
+    const image = this.imagePrintUniforms;
+    image.uStyle.value = p.engraving > 0.001 ? 2 : p.halftone > 0.001 ? 1 : 0;
+    image.uMono.value = p.mono;
+    image.uDensityGamma.value = p.densityGamma;
+    image.uStippleStrength.value = p.stipple;
+    image.uStippleScale.value = p.stippleScale;
+    image.uHalftoneStrength.value = p.halftone;
+    image.uHalftoneCell.value = p.halftoneCell;
+    image.uHalftoneAngle.value = THREE.MathUtils.degToRad(p.halftoneAngle);
+    image.uHatchStrength.value = p.engraving;
+    image.uHatchLayers.value = p.hatchLayers;
+    image.uHatchSpacing.value = p.hatchSpacing;
+    image.uHatchAngle.value = THREE.MathUtils.degToRad(p.hatchAngle);
+    image.uInkSource.value = p.inkSource;
+    image.uInkPolarity.value = p.inkPolarity;
+    image.uInkGain.value = p.inkGain;
+    image.uEdgeStrength.value = p.edgeStrength;
+    image.uEdgeThreshold.value = p.edgeThreshold;
+    image.uEdgeWidth.value = p.edgeWidth;
+    image.uVignette.value = p.vignette;
+    image.uGrain.value = p.grain;
+
     // 摆动幅度变了要重设角度限位（0 = 锁死正面）
     this.applySwayLimits();
+
+    // 运动模式切换：视差模式禁用旋转（拖动 = 平移）；切回来时把基准位姿对齐当前
+    this.controls.enableRotate = !p.parallaxMode;
+    if (p.parallaxMode !== this.parallaxMode) {
+      this.parallaxMode = p.parallaxMode;
+      if (p.parallaxMode) {
+        // 进入视差：让相机回到取景基准（避免从倾斜姿态开始平移）
+        const distance = this.camera.position.distanceTo(this.controls.target);
+        this.poseFromOffsets(0, 0, distance);
+        this.controls.update();
+        this.captureParallaxBase();
+      } else {
+        this.captureParallaxBase();
+      }
+    }
 
     // 基准视角切换（正面 ↔ 3/4）需要重新取景
     if (p.threeQuarterView !== this.threeQuarterView) {
@@ -1062,6 +1353,8 @@ export class Viewer {
 
     this.smoothUniforms.uTexel.value.set(1 / w, 1 / h);
     this.compositeUniforms.uTexel.value.set(1 / w, 1 / h);
+    this.imagePrintUniforms.uTexel.value.set(1 / w, 1 / h);
+    this.updateImageScale(w / Math.max(h, 1));
 
     // 点大小的换算：uPointSize 是「参考深度处的 CSS 像素」，乘 dpr 换到设备像素
     this.applyDepthRange();
@@ -1106,16 +1399,23 @@ export class Viewer {
     this.updateBoil();
 
     if (this.params.autoSway) {
-      // 自动**摆动**（往返）而不是转圈：真实插画的深度只是剪影平板，转满一圈会露馅。
-      // 这里不走 OrbitControls 的 autoRotate（它只会单向绕圈且会被角度限位卡死）。
+      // 自动运动（往返）。不是转圈：真实插画的深度只是剪影平板，转满一圈会露馅。
       this.swayClock = (this.swayClock + dt) % LIVE_SWAY_PERIOD;
       const phase = (this.swayClock / LIVE_SWAY_PERIOD) * Math.PI * 2;
-      const amplitude = this.swayAmplitudeRad();
       const sway = Math.sin(phase);
-      const distance = this.camera.position.distanceTo(this.controls.target);
-      this.poseFromOffsets(amplitude * sway, amplitude * SWAY_PITCH_RATIO * sway, distance);
+      if (this.params.parallaxMode) {
+        // 视差平移：只挪机位，朝向恒定（平板永远平行于画面）
+        const amplitude = this.parallaxAmplitude();
+        this.poseParallax(amplitude * sway, 0.5 * amplitude * sway);
+      } else {
+        const amplitude = this.swayAmplitudeRad();
+        const distance = this.camera.position.distanceTo(this.controls.target);
+        this.poseFromOffsets(amplitude * sway, amplitude * SWAY_PITCH_RATIO * sway, distance);
+      }
     } else {
       this.controls.update(dt);
+      // 视差模式下用户拖动 = 平移；把基准位姿跟到当前位置
+      if (this.params.parallaxMode) this.syncParallaxBaseFromCamera();
     }
 
     this.renderFrame();
@@ -1147,6 +1447,9 @@ export class Viewer {
       this.compositeUniforms.uBoilFlicker.value = 0;
       this.halftoneUniforms.uHalftoneOffset.value.set(0, 0);
       this.engravingUniforms.uScreenOffset.value.set(0, 0);
+      this.imagePrintUniforms.uScreenOffset.value.set(0, 0);
+      this.imagePrintUniforms.uBoilJitter.value.set(0, 0);
+      this.imagePrintUniforms.uBoilFlicker.value = 0;
       return;
     }
 
@@ -1172,6 +1475,16 @@ export class Viewer {
       (r2 - 0.5) * hatchSpacing,
       (r3 - 0.5) * hatchSpacing,
     );
+    // 图像模式：屏幕空间点画/网点/排线也按相位重排（< 一个格子，不会跳）
+    this.imagePrintUniforms.uScreenOffset.value.set(
+      (r2 - 0.5) * Math.max(hatchSpacing, 4),
+      (r3 - 0.5) * Math.max(hatchSpacing, 4),
+    );
+    this.imagePrintUniforms.uBoilJitter.value.set(
+      (r2 - 0.5) * 2 * BOIL_LINE_JITTER,
+      (r3 - 0.5) * 2 * BOIL_LINE_JITTER,
+    );
+    this.imagePrintUniforms.uBoilFlicker.value = r1;
   }
 
   // ── 录制 / 出帧 ────────────────────────────────────────────────────────
@@ -1204,6 +1517,12 @@ export class Viewer {
     if (total % framesPerPhase !== 0) framesPerPhase = 1; // 兜底：一帧一相
     const phases = total / framesPerPhase;
     const swayAmplitudeDeg = THREE.MathUtils.clamp(this.params.swayAmplitude, 0, SWAY_MAX_DEG);
+    const parallaxMode = this.params.parallaxMode;
+    const parallaxPercent = THREE.MathUtils.clamp(
+      this.params.parallaxAmount,
+      0,
+      PARALLAX_MAX_PERCENT,
+    );
 
     const target = this.controls.target.clone();
     const distance = Math.max(this.camera.position.distanceTo(target), 1e-6);
@@ -1211,21 +1530,27 @@ export class Viewer {
     this.capture = {
       totalFrames: total,
       swings,
+      parallaxMode,
+      parallaxPercent,
       swayAmplitudeDeg,
       framesPerPhase,
       phases,
       boilHz: CAPTURE_FPS / framesPerPhase,
       seconds: total / CAPTURE_FPS,
       distance,
+      parallaxWorld: (parallaxPercent / 100) * this.sceneWidth,
       target,
       savedPosition: this.camera.position.clone(),
       savedTarget: target.clone(),
+      savedQuaternion: this.camera.quaternion.clone(),
     };
 
     this.controls.enabled = false;
     return {
       totalFrames: total,
       swings,
+      parallaxMode,
+      parallaxPercent,
       swayAmplitudeDeg,
       framesPerPhase,
       phases,
@@ -1244,12 +1569,17 @@ export class Viewer {
 
     const wrapped = ((index % capture.totalFrames) + capture.totalFrames) % capture.totalFrames;
 
-    // 摆动：θ 走完整周期；sin 让方位/俯仰在 T 处回到起点
+    // 运动相位：θ 走完整周期；sin 在 T 处回到起点（state(N) ≡ state(0)）
     const phaseAngle = Math.PI * 2 * capture.swings * (wrapped / capture.totalFrames);
-    const amplitude = THREE.MathUtils.degToRad(capture.swayAmplitudeDeg);
     const sway = Math.sin(phaseAngle);
 
-    this.poseFromOffsets(amplitude * sway, amplitude * SWAY_PITCH_RATIO * sway, capture.distance);
+    if (capture.parallaxMode) {
+      // 视差平移：dx = A·sinθ，dy = 0.5A·sinθ；**朝向不变**（poseParallax 不改四元数）
+      this.poseParallax(capture.parallaxWorld * sway, 0.5 * capture.parallaxWorld * sway);
+    } else {
+      const amplitude = THREE.MathUtils.degToRad(capture.swayAmplitudeDeg);
+      this.poseFromOffsets(amplitude * sway, amplitude * SWAY_PITCH_RATIO * sway, capture.distance);
+    }
 
     const phase = Math.floor(wrapped / capture.framesPerPhase) % capture.phases;
     this.applyBoilPhase(phase);
@@ -1263,11 +1593,13 @@ export class Viewer {
     if (!capture) return;
     this.capture = null;
     this.camera.position.copy(capture.savedPosition);
+    this.camera.quaternion.copy(capture.savedQuaternion);
     this.controls.target.copy(capture.savedTarget);
     this.controls.enabled = true;
     this.lastTickAt = 0;
     this.applyParams();
     this.controls.update();
+    this.syncParallaxBaseFromCamera();
     this.renderFrame();
   }
 
@@ -1293,9 +1625,28 @@ export class Viewer {
   /** 捕获计划信息（未在捕获时返回 null） */
   get capturePlan(): CapturePlan | null {
     if (!this.capture) return null;
-    const { totalFrames, swings, swayAmplitudeDeg, framesPerPhase, phases, boilHz, seconds } =
-      this.capture;
-    return { totalFrames, swings, swayAmplitudeDeg, framesPerPhase, phases, boilHz, seconds };
+    const {
+      totalFrames,
+      swings,
+      parallaxMode,
+      parallaxPercent,
+      swayAmplitudeDeg,
+      framesPerPhase,
+      phases,
+      boilHz,
+      seconds,
+    } = this.capture;
+    return {
+      totalFrames,
+      swings,
+      parallaxMode,
+      parallaxPercent,
+      swayAmplitudeDeg,
+      framesPerPhase,
+      phases,
+      boilHz,
+      seconds,
+    };
   }
 
   private renderFrame(): void {
@@ -1304,9 +1655,27 @@ export class Viewer {
     const smoothTarget = this.smoothTarget;
     const colorPoints = this.colorPoints;
     const depthPoints = this.depthPoints;
-    if (!colorTarget || !depthTarget || !smoothTarget || !colorPoints || !depthPoints) return;
+    if (!colorTarget) return;
 
     const renderer = this.renderer;
+
+    // ── 图像模式（不碰深度）：原图 → colorRT → 图像合成 pass ───────────────
+    if (this.useImageMode()) {
+      renderer.setRenderTarget(colorTarget);
+      renderer.setClearColor(this.paperColor, 1);
+      renderer.clear();
+      this.quadMesh.material = this.imageQuadMaterial;
+      renderer.render(this.quadScene, this.quadCamera);
+
+      renderer.setRenderTarget(null);
+      renderer.setClearColor(this.paperColor, 1);
+      renderer.clear();
+      this.imagePrintUniforms.tColor.value = colorTarget.texture;
+      this.quadMesh.material = this.imagePrintMaterial;
+      renderer.render(this.quadScene, this.quadCamera);
+      return;
+    }
+    if (!depthTarget || !smoothTarget || !colorPoints || !depthPoints) return;
 
     // ── 1. 深度 pass ──────────────────────────────────────────────────────
     renderer.setRenderTarget(depthTarget);

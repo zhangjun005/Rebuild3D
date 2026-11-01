@@ -37,30 +37,73 @@ interface SliderDef {
   digits: number;
   /** 只有这个参数 > above 时才显示（半调相关参数在点画模式下藏起来，面板别太长） */
   dependsOn?: { key: NumericParamKey; above: number };
+  /** 更一般的显示条件（模式相关：图像模式没有点，点大小/密度要藏起来） */
+  visibleWhen?: (params: RenderParams) => boolean;
+}
+
+/** 下拉选项（模式 / 墨量来源 / 主体极性这类枚举参数） */
+interface SelectDef {
+  key: 'renderMode' | 'inkSource' | 'inkPolarity';
+  label: string;
+  options: ReadonlyArray<{ value: number | string; label: string }>;
+  visibleWhen?: (params: RenderParams) => boolean;
 }
 
 /** 顺序即面板顺序：L1 → L2 → L4 */
 const SLIDERS: readonly SliderDef[] = [
-  { key: 'pointSize', label: '点大小', min: 0.5, max: 12, step: 0.1, digits: 1 },
-  { key: 'density', label: '点数密度', min: 0.05, max: 1, step: 0.01, digits: 2 },
-  { key: 'stipple', label: '点画强度', min: 0, max: 1, step: 0.01, digits: 2 },
+  { key: 'pointSize', label: '点大小', min: 0.5, max: 12, step: 0.1, digits: 1, visibleWhen: (p) => p.renderMode === 'cloud' },
+  { key: 'density', label: '点数密度', min: 0.05, max: 1, step: 0.01, digits: 2, visibleWhen: (p) => p.renderMode === 'cloud' },
+  { key: 'stippleScale', label: '点画尺度 px', min: 1.5, max: 10, step: 0.1, digits: 1, visibleWhen: (p) => p.renderMode === 'image' && p.halftone <= 0.001 && p.engraving <= 0.001 },
+  { key: 'inkGain', label: '结构增益', min: 1, max: 24, step: 0.5, digits: 1, visibleWhen: (p) => p.inkSource === 1 },
+  { key: 'stipple', label: '点画强度', min: 0, max: 1, step: 0.01, digits: 2, visibleWhen: (p) => p.halftone <= 0.001 && p.engraving <= 0.001 },
   { key: 'densityGamma', label: '明暗曲线', min: 0.4, max: 2.5, step: 0.05, digits: 2 },
   { key: 'edgeStrength', label: '描边强度', min: 0, max: 2, step: 0.05, digits: 2 },
   { key: 'edgeThreshold', label: '描边阈值', min: 0.02, max: 0.6, step: 0.01, digits: 2 },
   { key: 'edgeWidth', label: '描边宽度', min: 0.5, max: 4, step: 0.1, digits: 1 },
-  { key: 'fogAmount', label: '空气透视', min: 0, max: 1, step: 0.01, digits: 2 },
+  { key: 'fogAmount', label: '空气透视', min: 0, max: 1, step: 0.01, digits: 2, visibleWhen: (p) => p.renderMode === 'cloud' },
   { key: 'mono', label: '单色墨点', min: 0, max: 1, step: 0.01, digits: 2 },
   { key: 'grain', label: '纸颗粒', min: 0, max: 0.3, step: 0.005, digits: 3 },
   { key: 'vignette', label: '暗角', min: 0, max: 1, step: 0.01, digits: 2 },
-  { key: 'swayAmplitude', label: '摆动幅度 ±°', min: 0, max: 45, step: 1, digits: 0 },
-  { key: 'halftone', label: '半调网点', min: 0, max: 1, step: 0.01, digits: 2 },
+  { key: 'swayAmplitude', label: '摆动幅度 ±°', min: 0, max: 45, step: 1, digits: 0, visibleWhen: (p) => !p.parallaxMode && p.renderMode === 'cloud' },
+  { key: 'parallaxAmount', label: '视差幅度 %', min: 0, max: 15, step: 0.5, digits: 1, visibleWhen: (p) => p.parallaxMode && p.renderMode === 'cloud' },
+  { key: 'halftone', label: '半调网点', min: 0, max: 1, step: 0.01, digits: 2, visibleWhen: (p) => p.engraving <= 0.001 },
   { key: 'halftoneCell', label: '网点大小 px', min: 3, max: 14, step: 0.5, digits: 1, dependsOn: { key: 'halftone', above: 0.001 } },
   { key: 'halftoneAngle', label: '网屏角度 °', min: 0, max: 90, step: 1, digits: 0, dependsOn: { key: 'halftone', above: 0.001 } },
-  { key: 'engraving', label: '铜版画排线', min: 0, max: 1, step: 0.01, digits: 2 },
+  { key: 'engraving', label: '铜版画排线', min: 0, max: 1, step: 0.01, digits: 2, visibleWhen: (p) => p.halftone <= 0.001 },
   { key: 'hatchLayers', label: '排线层数', min: 2, max: 4, step: 1, digits: 0, dependsOn: { key: 'engraving', above: 0.001 } },
   { key: 'hatchSpacing', label: '排线间距 px', min: 3, max: 12, step: 0.5, digits: 1, dependsOn: { key: 'engraving', above: 0.001 } },
   { key: 'hatchAngle', label: '排线角度 °', min: 0, max: 180, step: 1, digits: 0, dependsOn: { key: 'engraving', above: 0.001 } },
   { key: 'posterizeLevels', label: '色阶数', min: 3, max: 5, step: 1, digits: 0, dependsOn: { key: 'engraving', above: 0.001 } },
+];
+
+/** 枚举参数（模式 / 墨量来源 / 主体极性）：下拉框比滑块直观得多 */
+const SELECTS: readonly SelectDef[] = [
+  {
+    key: 'renderMode',
+    label: '渲染模式',
+    options: [
+      { value: 'image', label: '图像模式（保真·线稿）' },
+      { value: 'cloud', label: '点云模式（立体·视差）' },
+    ],
+  },
+  {
+    key: 'inkSource',
+    label: '墨量来源',
+    options: [
+      { value: 1, label: '按局部结构（默认）' },
+      { value: 0, label: '按亮度' },
+      { value: 2, label: '按深度' },
+    ],
+  },
+  {
+    key: 'inkPolarity',
+    label: '主体极性',
+    options: [
+      { value: 0, label: '自动' },
+      { value: 1, label: '亮主体' },
+      { value: 2, label: '暗主体' },
+    ],
+  },
 ];
 
 export interface PanelOptions {
@@ -141,17 +184,31 @@ export class Panel {
     scrollArea.append(presets);
     this.setActivePreset(options.activePreset);
 
-    // ── 滑块 ──
-    for (const def of SLIDERS) {
-      scrollArea.append(this.buildSlider(def));
+    // ── 模式 / 墨量映射（第一层：要不要立体；第二层：这幅画该怎么读）──
+    for (const def of SELECTS) {
+      scrollArea.append(this.buildSelect(def));
     }
+    scrollArea.append(document.createElement('hr'));
+
+    // ── 滑块（两列排布：控制项多，单列在 900px 高度下会滚）──
+    const sliderGrid = document.createElement('div');
+    sliderGrid.className = 'grid2';
+    for (const def of SLIDERS) {
+      sliderGrid.append(this.buildSlider(def));
+    }
+    scrollArea.append(sliderGrid);
 
     scrollArea.append(document.createElement('hr'));
 
     // ── 开关 ──
     scrollArea.append(this.buildToggle('boil', '沸腾线（每 2~3 帧换相位）'));
-    scrollArea.append(this.buildToggle('autoSway', '自动摆动（±15° 来回，不转圈）'));
-    scrollArea.append(this.buildToggle('threeQuarterView', '3/4 基准视角（仅调试 fixture）'));
+    scrollArea.append(this.buildToggle('autoSway', '自动运动（往返）'));
+    scrollArea.append(this.buildToggle('parallaxMode', '视差平移（不旋转，平板不变形）'));
+    const threeQuarterRow = this.buildToggle('threeQuarterView', '3/4 基准视角（仅调试 fixture）');
+    this.syncers.push(() => {
+      threeQuarterRow.hidden = this.params.renderMode !== 'cloud';
+    });
+    scrollArea.append(threeQuarterRow);
 
     // ── 背景色 ──
     scrollArea.append(this.buildColor('paper', '背景 / 纸色'));
@@ -203,18 +260,62 @@ export class Panel {
       output.textContent = value.toFixed(def.digits);
     });
 
-    // 依赖其它参数的滑块：点画模式下把半调参数藏起来（面板本来就长）
+    // 依赖其它参数 / 当前模式的滑块：不适用时藏起来（面板本来就长）
     const dependsOn = def.dependsOn;
-    if (dependsOn) {
+    const visibleWhen = def.visibleWhen;
+    if (dependsOn || visibleWhen) {
       this.syncers.push(() => {
-        row.hidden = this.params[dependsOn.key] <= dependsOn.above;
+        const byParam = dependsOn ? this.params[dependsOn.key] > dependsOn.above : true;
+        row.hidden = !(byParam && (visibleWhen ? visibleWhen(this.params) : true));
       });
     }
 
     return row;
   }
 
-  private buildToggle(key: 'boil' | 'autoSway' | 'threeQuarterView', labelText: string): HTMLElement {
+  /** 下拉行（模式 / 墨量来源 / 主体极性） */
+  private buildSelect(def: SelectDef): HTMLElement {
+    const row = document.createElement('div');
+    row.className = 'row';
+
+    const label = document.createElement('label');
+    const name = document.createElement('span');
+    name.textContent = def.label;
+    label.append(name);
+
+    const select = document.createElement('select');
+    for (const option of def.options) {
+      const el = document.createElement('option');
+      el.value = String(option.value);
+      el.textContent = option.label;
+      select.append(el);
+    }
+    select.addEventListener('change', () => {
+      const raw = def.key === 'renderMode' ? select.value : Number(select.value);
+      // 枚举参数和字符串参数分开写，类型才收得住
+      if (def.key === 'renderMode') {
+        this.params.renderMode = raw as RenderParams['renderMode'];
+      } else {
+        this.params[def.key] = Number(raw);
+      }
+      this.onChange();
+    });
+
+    row.append(label, select);
+
+    this.syncers.push(() => {
+      const value = String(this.params[def.key]);
+      if (select.value !== value) select.value = value;
+      row.hidden = def.visibleWhen ? !def.visibleWhen(this.params) : false;
+    });
+
+    return row;
+  }
+
+  private buildToggle(
+    key: 'boil' | 'autoSway' | 'threeQuarterView' | 'parallaxMode',
+    labelText: string,
+  ): HTMLElement {
     const row = document.createElement('div');
     row.className = 'row check';
 
@@ -403,6 +504,12 @@ export class Panel {
   }
 
   /** 当前预设（导出文件名用） */
+  /** 外部切换预设（比如真实插画上传后默认用铜版画）：同步按钮高亮 */
+  setPreset(key: PresetKey): void {
+    this.setActivePreset(key);
+    this.sync();
+  }
+
   get currentPreset(): PresetKey {
     return this.preset;
   }
