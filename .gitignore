@@ -10,6 +10,8 @@ coverage.*
 web/node_modules/
 web/dist/
 web/.vite/
+# 截图验证产物（web-render 自检用）
+web/.shots/
 
 # ── Python ──
 __pycache__/

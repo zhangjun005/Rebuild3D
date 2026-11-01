@@ -84,6 +84,15 @@ if (Test-Path $EnvPy) {
 $pyVer = & $EnvPy -c "import sys;print(sys.version.split()[0])"
 Ok "python $pyVer"
 
+# 硬闸：确认这个解释器确实落在 conda envs 目录下，防止误用 base / 系统 python。
+# 注意：不能用 PIP_REQUIRE_VIRTUALENV —— pip 只把 venv 认作虚拟环境，
+# conda env 里 sys.prefix == sys.base_prefix，那样设会让所有 pip 调用直接报错退出。
+$prefix = (& $EnvPy -c "import sys;print(sys.prefix)").Trim()
+if (-not $prefix.ToLower().StartsWith('e:\conda\envs_dirs')) {
+    throw "拒绝继续：解释器不在 conda envs 目录下（sys.prefix=$prefix）"
+}
+Ok "sys.prefix = $prefix"
+
 # ── 2. activate.d：把缓存赶出 C 盘 + 两道硬闸 ─────────────────────────────
 Step 'activate.d 环境变量'
 New-Item -ItemType Directory -Path $ActivateDir -Force | Out-Null
@@ -95,7 +104,6 @@ $ps1 = @"
 # 由 scripts/setup-env.ps1 生成，勿手改。
 # 目标：不污染全局环境 + 所有缓存落 E 盘（C 盘只剩 ~3.9GB）
 `$env:PIP_CACHE_DIR          = '$CachePip'
-`$env:PIP_REQUIRE_VIRTUALENV  = '1'
 `$env:PYTHONNOUSERSITE       = '1'
 `$env:HF_HOME                = '$HfHome'
 `$env:HF_ENDPOINT            = 'https://hf-mirror.com'
@@ -105,7 +113,6 @@ $bat = @"
 @echo off
 rem 由 scripts/setup-env.ps1 生成，勿手改。
 set "PIP_CACHE_DIR=$CachePip"
-set "PIP_REQUIRE_VIRTUALENV=1"
 set "PYTHONNOUSERSITE=1"
 set "HF_HOME=$HfHome"
 set "HF_ENDPOINT=https://hf-mirror.com"
@@ -116,8 +123,8 @@ Set-Content -Path (Join-Path $ActivateDir 'env_vars.bat') -Value $bat -Encoding 
 Ok "已写入 $ActivateDir"
 
 # 本进程也应用一遍，后面的 pip 才会用 E 盘缓存
+# 注意：这里刻意不设 PIP_REQUIRE_VIRTUALENV —— pip 不认 conda env，设了会让 pip 拒绝执行。
 $env:PIP_CACHE_DIR = $CachePip
-$env:PIP_REQUIRE_VIRTUALENV = '1'
 $env:PYTHONNOUSERSITE = '1'
 $env:HF_HOME = $HfHome
 $env:HF_ENDPOINT = 'https://hf-mirror.com'
