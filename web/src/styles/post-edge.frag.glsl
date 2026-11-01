@@ -24,14 +24,54 @@ uniform float uGrain; // 纸颗粒 0..1
 uniform vec2 uBoilJitter; // 沸腾：描边采样抖动（像素）
 uniform float uBoilFlicker; // 沸腾：阈值抖动 0..1
 
+// ── 彩色点画（保留原色）的印刷叠加层 ─────────────────────────────────────
+// 关键：质感**不参与点生成**。点只负责带颜色，网点/纸纹/色调分离都在这里叠。
+uniform float uColorMode; // 1 = 彩色点画路径
+uniform float uColorPosterize; // 色调分离级数（0/1 = 不分离）
+uniform float uColorHalftone; // 屏幕空间网点叠加强度
+uniform float uColorCell; // 网点 cell 像素
+uniform float uColorAngle; // 网点角度（弧度）
+uniform sampler2D tPaperNoise; // 复用 blue noise 当纸纹
+
 varying vec2 vUv;
 
 float depthAt(vec2 uv) {
   return texture2D(tDepth, uv).r;
 }
 
+const vec3 LUMA = vec3(0.299, 0.587, 0.114);
+
+/** 彩色点画：色调分离 → 屏幕空间网点叠墨 → 纸纹 */
+vec3 printify(vec3 src) {
+  vec3 col = src;
+  // 1) 轻度色调分离（"像印刷品"的关键；5 级左右刚好）
+  float levels = uColorPosterize;
+  if (levels >= 2.0) {
+    col = floor(col * levels + 0.5) / levels;
+  }
+  // 2) 屏幕空间网点：暗部叠墨点多一些，亮部留白 → 印刷的调子层
+  float lum = clamp(dot(col, LUMA), 0.0, 1.0);
+  vec2 shifted = gl_FragCoord.xy + uBoilJitter * 4.0;
+  float c = cos(uColorAngle);
+  float s = sin(uColorAngle);
+  vec2 rotated = vec2(c * shifted.x - s * shifted.y, s * shifted.x + c * shifted.y);
+  vec2 cell = fract(rotated / max(uColorCell, 2.0)) - 0.5;
+  float radius = sqrt(clamp(1.0 - lum, 0.0, 1.0)) * 0.5;
+  float dots = 1.0 - smoothstep(radius - 0.07, radius + 0.07, length(cell));
+  col = mix(col, uInk, dots * uColorHalftone * 0.55 * (1.0 - lum));
+  // 3) 纸纹：低频纸色偏移 + 高频颗粒（不改变构图）
+  float speck = texture2D(tPaperNoise, gl_FragCoord.xy / 128.0).r - 0.5;
+  col += speck * (0.035 + uGrain);
+  float fibre = texture2D(tPaperNoise, gl_FragCoord.xy / 512.0).r - 0.5;
+  col += fibre * 0.02;
+  return clamp(col, 0.0, 1.0);
+}
+
 void main() {
   vec3 col = texture2D(tColor, vUv).rgb;
+  if (uColorMode > 0.5) {
+    col = printify(col);
+  }
 
   // ── L2 深度描边：sobel on 平滑深度 ──────────────────────────────────────
   vec2 uv = vUv + uBoilJitter * uTexel;

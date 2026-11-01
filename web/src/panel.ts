@@ -67,7 +67,9 @@ const SLIDERS: readonly SliderDef[] = [
   { key: 'hatchLayers', label: '排线层数', min: 2, max: 4, step: 1, digits: 0, dependsOn: { key: 'engraving', above: 0.001 } },
   { key: 'hatchSpacing', label: '排线间距 px', min: 3, max: 12, step: 0.5, digits: 1, dependsOn: { key: 'engraving', above: 0.001 } },
   { key: 'hatchAngle', label: '排线角度 °', min: 0, max: 180, step: 1, digits: 0, dependsOn: { key: 'engraving', above: 0.001 } },
-  { key: 'posterizeLevels', label: '色阶数', min: 3, max: 5, step: 1, digits: 0, dependsOn: { key: 'engraving', above: 0.001 } },
+  { key: 'posterizeLevels', label: '色阶数', min: 3, max: 5, step: 1, digits: 0, visibleWhen: (p) => p.colorMode > 0.5 || p.engraving > 0.001 },
+  { key: 'colorPosterize', label: '色调分离级数', min: 2, max: 8, step: 1, digits: 0, visibleWhen: (p) => p.colorMode > 0.5 },
+  { key: 'colorHalftone', label: '彩色网点叠加', min: 0, max: 1, step: 0.01, digits: 2, visibleWhen: (p) => p.colorMode > 0.5 },
 ];
 
 /** 枚举参数（模式 / 墨量来源 / 主体极性）：下拉框比滑块直观得多 */
@@ -186,6 +188,7 @@ export class Panel {
     scrollArea.append(document.createElement('hr'));
 
     // ── 开关 ──
+    scrollArea.append(this.buildToggle('colorMode', '保留原色（彩色点画）'));
     scrollArea.append(this.buildToggle('boil', '沸腾线（每 2~3 帧换相位）'));
     scrollArea.append(this.buildToggle('autoSway', '自动运动（往返）'));
     scrollArea.append(this.buildToggle('parallaxMode', '视差平移（不旋转，平板不变形）'));
@@ -320,7 +323,7 @@ export class Panel {
   }
 
   private buildToggle(
-    key: 'boil' | 'autoSway' | 'threeQuarterView' | 'parallaxMode',
+    key: 'boil' | 'autoSway' | 'threeQuarterView' | 'parallaxMode' | 'colorMode',
     labelText: string,
   ): HTMLElement {
     const row = document.createElement('div');
@@ -335,13 +338,18 @@ export class Panel {
     label.textContent = labelText;
 
     input.addEventListener('change', () => {
-      this.params[key] = input.checked;
+      // colorMode 是 0/1 的数值参数（方便脚本 --param colorMode=0 传），其余开关是布尔
+      if (key === 'colorMode') {
+        this.params.colorMode = input.checked ? 1 : 0;
+      } else {
+        this.params[key] = input.checked;
+      }
       this.onChange();
     });
 
     row.append(input, label);
     this.syncers.push(() => {
-      input.checked = this.params[key];
+      input.checked = key === 'colorMode' ? this.params.colorMode > 0.5 : this.params[key];
     });
     return row;
   }

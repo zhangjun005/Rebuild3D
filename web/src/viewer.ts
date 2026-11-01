@@ -186,6 +186,13 @@ interface CompositeUniforms {
   uGrain: NumericUniform;
   uBoilJitter: THREE.IUniform<THREE.Vector2>;
   uBoilFlicker: NumericUniform;
+  // 彩色点画（保留原色 + 印刷叠加层）
+  uColorMode: NumericUniform;
+  uColorPosterize: NumericUniform;
+  uColorHalftone: NumericUniform;
+  uColorCell: NumericUniform;
+  uColorAngle: NumericUniform;
+  tPaperNoise: THREE.IUniform<THREE.Texture | null>;
 }
 
 /** 墨量映射（两种模式共用）：来源/极性/增益/平均亮度 */
@@ -474,6 +481,12 @@ export class Viewer {
       uGrain: { value: this.params.grain },
       uBoilJitter: { value: new THREE.Vector2() },
       uBoilFlicker: { value: 0 },
+      uColorMode: { value: this.params.colorMode },
+      uColorPosterize: { value: this.params.colorPosterize },
+      uColorHalftone: { value: this.params.colorHalftone },
+      uColorCell: { value: this.params.halftoneCell },
+      uColorAngle: { value: THREE.MathUtils.degToRad(this.params.halftoneAngle) },
+      tPaperNoise: { value: blueNoise },
     };
 
     this.pointMaterial = new THREE.ShaderMaterial({
@@ -1173,6 +1186,25 @@ export class Viewer {
     this.pointUniforms.uToneLow.value = this.toneLow;
     this.pointUniforms.uToneHigh.value = this.toneHigh;
     this.halftoneUniforms.uToneRange.value.set(this.toneLow, this.toneHigh);
+    // ── 彩色点画（保留原色）：点只带颜色，印刷质感在合成 pass 叠 ──────────
+    const colorMode = p.colorMode > 0.5;
+    if (colorMode) {
+      // 关键：不再是"亮度决定点密度"。所有点都画（密度滑块仍然均匀抽稀）。
+      this.pointUniforms.uStipple.value = 0;
+      this.pointUniforms.uMono.value = 0;
+      // 彩色点的明暗/层次由颜色本身表达：空气透视会把颜色洗成纸色，彩色路径关掉。
+      this.pointUniforms.uFogAmount.value = 0;
+      // 线稿已经在每点颜色里，深度描边只留一点点（否则 silhouette 一圈粗黑边抢戏）。
+      this.compositeUniforms.uEdgeStrength.value = p.edgeStrength * 0.18;
+      // 彩色点要更"实"：点略放大盖住纸缝，颜色才不会被纸色稀释成粉彩。
+      this.pointUniforms.uPointSize.value = p.pointSize * 1.35;
+    }
+    this.compositeUniforms.uColorMode.value = colorMode ? 1 : 0;
+    this.compositeUniforms.uColorPosterize.value = p.colorPosterize;
+    this.compositeUniforms.uColorHalftone.value = p.colorHalftone;
+    this.compositeUniforms.uColorCell.value = p.halftoneCell;
+    this.compositeUniforms.uColorAngle.value = THREE.MathUtils.degToRad(p.halftoneAngle);
+
     this.halftoneUniforms.uInkSource.value = p.inkSource;
     this.halftoneUniforms.uInkPolarity.value = p.inkPolarity;
     this.halftoneUniforms.uInkGain.value = p.inkGain;

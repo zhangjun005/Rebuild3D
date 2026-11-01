@@ -33,6 +33,19 @@ export interface RenderParams {
   density: number;
 
   // ── L2 风格层 ──
+  /**
+   * 保留原色（彩色点画）：1 = 用每点自带的颜色渲染、点密度不再由亮度决定，
+   * 印刷质感（纸纹/网点/posterize）改成合成 pass 的叠加层。
+   * 0 = 旧的单色墨量路径（亮度 → 点密度），铜版画/半调仍走这条。
+   *
+   * 为什么默认开：点云里本来就有线稿（在每点颜色里），
+   * "亮度→点密度 + 单色" 会把亮主体（白裙）直接抹掉。
+   */
+  colorMode: number;
+  /** 彩色点画的色调分离级数（0/1 = 不分离，4~6 = 像印刷品） */
+  colorPosterize: number;
+  /** 彩色点画的屏幕空间网点叠加强度 0..1（不参与点生成） */
+  colorHalftone: number;
   /** 点画强度 0..1（图像模式 = 屏幕空间 stipple 的墨量上限） */
   stipple: number;
   /** 图像模式的点画网点尺度（像素，2~10）：blue noise 打连续图像，不会摩尔纹 */
@@ -120,6 +133,7 @@ export type NumericParamKey = {
 }[keyof RenderParams];
 
 export const PRESET_KEYS = [
+  'color-print',
   'stipple-print',
   'halftone-manga',
   'engraving',
@@ -147,6 +161,9 @@ const DEFAULTS = {
   threeQuarterView: false,
   parallaxMode: true,
   parallaxAmount: 4,
+  colorMode: 1,
+  colorPosterize: 5,
+  colorHalftone: 0.55,
   renderMode: 'cloud', // 产品路径 = 点云；图像模式只做对照
   inkSource: 1,
   inkPolarity: 0,
@@ -162,6 +179,36 @@ const DEFAULTS = {
  * 未做：油画（要笔触 quad 基元）、像素立体书（要 voxel/InstancedMesh 基元）、梦境星空（加法混合粒子）。
  */
 export const PRESETS: Record<PresetKey, Preset> = {
+  // ── 彩色点画（产品主路径）：保留每点颜色，印刷质感做叠加层 ──
+  'color-print': {
+    label: '彩色点画',
+    params: {
+      ...DEFAULTS,
+      pointSize: 2.6,
+      softness: 0.6,
+      density: 1.0,
+      stipple: 0.0, // 点密度不再由亮度决定（colorMode 会强制归零）
+      densityGamma: 1.0,
+      edgeStrength: 0.15, // 线稿在颜色里，深度描边只留一点点
+      edgeThreshold: 0.35,
+      edgeWidth: 2.0,
+      fogAmount: 0.0,
+      mono: 0.0,
+      grain: 0.02,
+      vignette: 0.12,
+      swayAmplitude: 15,
+      autoSway: true,
+      halftone: 0.0,
+      halftoneCell: 8,
+      halftoneAngle: 45,
+      engraving: 0.0,
+      boil: false,
+      paper: '#f6f0e4',
+      colorMode: 1,
+      colorPosterize: 5,
+      colorHalftone: 0.5,
+    },
+  },
   'stipple-print': {
     label: '点画印刷',
     params: {
@@ -170,6 +217,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
       softness: 0.6,
       density: 1.0,
       stipple: 0.9,
+      colorMode: 0, // 单色墨量路径（亮度→点密度）
       densityGamma: 1.3,
       edgeStrength: 1.0,
       edgeThreshold: 0.3,
@@ -198,6 +246,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
       softness: 0.35,
       density: 1.0,
       stipple: 0.0,
+      colorMode: 0,
       densityGamma: 1.2,
       edgeStrength: 1.6, // 粗描边
       edgeThreshold: 0.22,
@@ -229,6 +278,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
       softness: 0.4,
       density: 1.0,
       stipple: 0.0,
+      colorMode: 0,
       densityGamma: 1.3, // 屏幕化的调子曲线
       edgeStrength: 1.1,
       edgeThreshold: 0.3,
@@ -257,6 +307,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
       softness: 0.5,
       density: 1.0,
       stipple: 0.85,
+      colorMode: 0,
       densityGamma: 2.0, // 中间调调亮，把画面让给线条
       edgeStrength: 1.4,
       edgeThreshold: 0.3,
@@ -297,7 +348,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
   },
 };
 
-export const DEFAULT_PRESET: PresetKey = 'stipple-print';
+export const DEFAULT_PRESET: PresetKey = 'color-print';
 
 /** 深拷贝一份参数，避免预设对象被运行时改掉 */
 export function cloneParams(params: RenderParams): RenderParams {
