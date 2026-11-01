@@ -335,9 +335,11 @@ async function boot(): Promise<void> {
       });
       applyCloud(result.cloud, `${file.name} · ${result.metrics.pointCount.toLocaleString('en-US')} 点`);
       cloudForFile = file;
-      // 点云模式：深度里没有"局部结构"信息（平坦板），墨量来源切回按亮度
-      if (viewer.params.inkSource === 1) {
-        viewer.params.inkSource = 0;
+      // 点云模式：唯一可靠的信号是**深度** → 墨量按深度 + 极性「暗主体」（不做翻转）。
+      // 近层（主体）上墨、远景（背景）留纸，figure-ground 才分得开；按亮度会让白主体消失。
+      if (viewer.params.inkSource !== 2) {
+        viewer.params.inkSource = 2;
+        viewer.params.inkPolarity = 2;
         viewer.setParams(viewer.params);
         panel.sync();
       }

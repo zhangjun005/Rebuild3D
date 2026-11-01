@@ -95,8 +95,17 @@ const IMAGE_EDGE_THRESHOLD_SCALE = 0.4;
  *
  * 3/4：只适合看 fixture（球+立方体）的立体感，调试用开关。
  */
-const BASE_DIR_FRONT = new THREE.Vector3(0, 0, 1);
-const BASE_DIR_THREE_QUARTER = new THREE.Vector3(0.34, 0.36, 0.87);
+/**
+ * 取景基准方向 = 相机相对点云中心的方向（相机在 center + dir·distance）。
+ *
+ * ★ 必须是 **-Z**：Depth-Anything 一类单目深度模型输出的是「距离型深度」（越大越远），
+ *   Go 侧按 x=(u-cx)z/f、z=d 反投影（docs/selection.md §4.4），所以点云的 z 越大越远。
+ *   相机放在 +Z 会把远近看反：背景跑到主体前面、空气透视把主体洗白、按深度上墨把墨上到背景。
+ *   实测（平涂131905131）：画面外围（背景）z≈0.86，中心（主体）z≈0.48。
+ *   相机放 -Z 沿 +Z 看 = 「正对画面」的正确方位。
+ */
+const BASE_DIR_FRONT = new THREE.Vector3(0, 0, -1);
+const BASE_DIR_THREE_QUARTER = new THREE.Vector3(0.34, 0.36, -0.87);
 
 /** 沸腾：一个可回绕循环的「逻辑帧」数（60 fps 下 0.8 s） */
 const BOIL_CYCLE_FRAMES = 48;

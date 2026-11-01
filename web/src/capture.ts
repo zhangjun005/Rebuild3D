@@ -81,7 +81,10 @@ export function buildCaptureName(
     `d${fmt(params.stipple)}`,
     `p${fmt(params.pointSize)}`,
     `e${fmt(params.edgeStrength)}`,
-    `sw${Math.round(params.swayAmplitude)}`,
+    // 运动模式的幅度：视差按「场景宽度百分比」记 par4，旋转按角度记 sw15
+    params.parallaxMode
+      ? `par${fmt(params.parallaxAmount)}`
+      : `sw${Math.round(params.swayAmplitude)}`,
     `${size.width}x${size.height}`,
     `${fmt(seconds)}s`,
   ];
