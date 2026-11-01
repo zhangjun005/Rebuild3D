@@ -57,12 +57,13 @@ func buildStructure(depth []float32, w, h int, img image.Image, p Params, focal 
 		wx := i % gw
 		wy := i / gw
 		d := upDepth[i]
-		// 与 UnprojectPerspective 等价（把焦距按工作分辨率缩放后代入）：
+		// 与 UnprojectPerspective 等价（把焦距按工作分辨率缩放后代入，z = -d）：
 		//   x = ((wx+0.5)/gw - 0.5) * d * w/focal
 		//   y = (0.5 - (wy+0.5)/gh) * d * h/focal
+		//   z = -d        （d 是距离、越大越远；相机在 +Z 朝 -Z 看）
 		x := ((float64(wx)+0.5)/float64(gw) - 0.5) * float64(d) * worldPerPixelX
 		y := (0.5 - (float64(wy)+0.5)/float64(gh)) * float64(d) * worldPerPixelY
-		pts[j] = geometry.Vec3{X: float32(x), Y: float32(y), Z: d}
+		pts[j] = geometry.Vec3{X: float32(x), Y: float32(y), Z: float32(-float64(d))}
 		cols[j] = sampleColor(img, bounds, wx, wy, gw, gh)
 		if gn[i] > EdgeRatioThreshold {
 			edgeCount++
@@ -75,7 +76,7 @@ func buildStructure(depth []float32, w, h int, img image.Image, p Params, focal 
 	if p.VoxelSize > 0 {
 		pts, cols = geometry.VoxelDownsample(pts, cols, p.VoxelSize)
 		if len(pts) > p.MaxPoints {
-			pts, cols, _ = autoDownsample(pts, cols, p.MaxPoints, medianZ(pts, 8192)/focal)
+			pts, cols, _ = autoDownsample(pts, cols, p.MaxPoints, medianDepth(pts, 8192)/focal)
 		}
 		if len(pts) == 0 {
 			return nil, ErrNoPoints
@@ -608,6 +609,7 @@ func stridePick(cands []int32, want int) []int32 {
 
 // edgeRatioByInverse 把点云反向投影回网格像素，统计 Gn > 0.5 的点占比。
 // focalX/focalY 是"网格分辨率下的焦距"（depthpixel 模式直接传 focal）。
+// 注意点云里 z = -d（d 是距离），反解像素时要先取 d = -z。
 func edgeRatioByInverse(pts []geometry.Vec3, gw, gh int, focalX, focalY float64, gn []float32) float64 {
 	if len(pts) == 0 || len(gn) == 0 || focalX == 0 || focalY == 0 {
 		return 0
@@ -616,13 +618,13 @@ func edgeRatioByInverse(pts []geometry.Vec3, gw, gh int, focalX, focalY float64,
 	cy := float64(gh) / 2
 	edge := 0
 	for _, p := range pts {
-		z := float64(p.Z)
-		if z <= 0 {
+		dist := -float64(p.Z) // z = -d
+		if dist <= 0 {
 			continue
 		}
-		// 由 x=(u+0.5-cx)*z/fx 反解 u、v。
-		u := float64(p.X)*focalX/z + cx - 0.5
-		v := cy - float64(p.Y)*focalY/z - 0.5
+		// 由 x=(u+0.5-cx)*d/fx 反解 u、v。
+		u := float64(p.X)*focalX/dist + cx - 0.5
+		v := cy - float64(p.Y)*focalY/dist - 0.5
 		ix := int(math.Round(u))
 		iy := int(math.Round(v))
 		if ix < 0 {

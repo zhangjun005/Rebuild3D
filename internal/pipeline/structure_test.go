@@ -27,6 +27,57 @@ func lineArtImage(w, h int) image.Image {
 	return img
 }
 
+// TestStructureModeDepthSign 是 structure 模式的防回归**语义**测试。
+//
+// structure 模式自己算 x/y/z（不经过 geometry.UnprojectPerspective），所以 z 符号
+// 必须单独保一个语义断言：中心深度小（主体）、外围深度大（背景）时，
+// 输出点云里中心点的 z 必须**大于**外围点（z=-d，越接近 0 越近）。
+func TestStructureModeDepthSign(t *testing.T) {
+	const w, h = 64, 64
+	depth := make([]float32, w*h)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			dx := float64(x) - float64(w-1)/2
+			dy := float64(y) - float64(h-1)/2
+			r := math.Hypot(dx, dy) / (float64(w-1) / 2) // 中心 0，四角 ≈1.41
+			depth[y*w+x] = float32(0.5 + 0.3*r)          // 主体在中心、背景在外围
+		}
+	}
+	res, err := Build(depth, w, h, uniformImage(w, h, color.RGBA{R: 128, G: 128, B: 128, A: 255}),
+		Params{SampleMode: SampleModeStructure, MaxPoints: 4000})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	c := decodeResult(t, res)
+
+	var centerSum, centerN, outerSum, outerN float64
+	for _, p := range c.Pos {
+		if p.Z >= 0 {
+			t.Fatalf("z 必须为负（相机在 +Z、深度沿 -Z），实际 %v", p.Z)
+		}
+		// 用世界坐标 xy 半径分中心/外围（世界坐标尺度 ±0.5 左右）。
+		r := math.Hypot(float64(p.X), float64(p.Y))
+		switch {
+		case r < 0.1:
+			centerSum += float64(p.Z)
+			centerN++
+		case r > 0.3:
+			outerSum += float64(p.Z)
+			outerN++
+		}
+	}
+	if centerN == 0 || outerN == 0 {
+		t.Fatalf("分区样本不足：center=%d outer=%d", int(centerN), int(outerN))
+	}
+	centerMean := centerSum / centerN
+	outerMean := outerSum / outerN
+	t.Logf("structure 模式：中心(主体)平均 z=%.4f（%d 点），外围(背景)平均 z=%.4f（%d 点）",
+		centerMean, int(centerN), outerMean, int(outerN))
+	if !(centerMean > outerMean) {
+		t.Fatalf("远近关系反了：中心(主体) mean z=%.4f 应大于 外围(背景) mean z=%.4f", centerMean, outerMean)
+	}
+}
+
 func TestWorkResFor(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -98,9 +149,9 @@ func TestStructureExactPointCount(t *testing.T) {
 	if res.EdgePointRatio != 0 {
 		t.Errorf("纯色图无结构边缘，EdgePointRatio 应 ≈0，实际 %v", res.EdgePointRatio)
 	}
-	// 深度值范围应在 [1, 1.7] 附近（上采样只会插值，不会越界）。
-	if res.BBoxMin.Z < 0.999 || res.BBoxMax.Z > 1.701 {
-		t.Errorf("Z 范围 = [%v, %v]，期望落在深度原值域 [1, 1.7]", res.BBoxMin.Z, res.BBoxMax.Z)
+	// 深度原值域 [1, 1.7] → z = -d 落在 [-1.7, -1]（相机在 +Z 朝 -Z 看）。
+	if res.BBoxMin.Z < -1.701 || res.BBoxMax.Z > -0.999 {
+		t.Errorf("Z 范围 = [%v, %v]，期望落在 [-1.7, -1]", res.BBoxMin.Z, res.BBoxMax.Z)
 	}
 }
 

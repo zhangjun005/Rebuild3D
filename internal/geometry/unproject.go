@@ -4,7 +4,13 @@ import "math"
 
 // 反投影：深度图 → 点云。
 //
-// 两个函数都返回长度恰为 w*h 的切片，下标 = y*w + x（逐像素一一对应），
+// 相机约定（docs/selection.md §4.4，必须三端一致）：
+//   - +x 向右、+y 向上、+z 指向观察者（右手系，three.js 默认朝向）；
+//   - 相机站在 +Z 朝 -Z 看；
+//   - **单目深度 d 是距离，d 越大越远**（DA3MONO 实测：主体 d≈0.48，背景 d≈0.86）。
+//     所以反投影后 z = -d：主体 z 更接近 0（离相机更近），背景 z 更负（更远）。
+//
+// 两个函数都返回长度恰为 w*h 的切片，下标 = y*w+x（逐像素一一对应），
 // 这样调用方可以同时用深度图、边缘掩码和点云按同一套下标操作。
 // 深度无效（<=0、NaN、±Inf）的像素输出零值点 Vec3{}，调用方应结合
 // FilterDepthEdges 或自行判断跳过。
@@ -24,7 +30,7 @@ import "math"
 //
 //	x = (u - cx) * d / fx
 //	y = (cy - v) * d / fy
-//	z = d
+//	z = -d          ← d 是距离，越大越远；z 为负（相机在 +Z）
 //
 // 返回 nil 表示参数非法（w/h <= 0、len(depth) < w*h、fx/fy 非有限或为 0）。
 func UnprojectPerspective(depth []float32, w, h int, fx, fy, cx, cy float64) []Vec3 {
@@ -48,11 +54,11 @@ func UnprojectPerspective(depth []float32, w, h int, fx, fy, cx, cy float64) []V
 				continue
 			}
 			u := float64(x) + 0.5
-			z := float64(d)
+			dist := float64(d)
 			out[row+x] = Vec3{
-				X: float32((u - cx) * z / fx),
-				Y: float32((cy - v) * z / fy),
-				Z: float32(z),
+				X: float32((u - cx) * dist / fx),
+				Y: float32((cy - v) * dist / fy),
+				Z: float32(-dist), // 相机在 +Z 朝 -Z 看：距离越大 z 越负
 			}
 		}
 	}
@@ -71,7 +77,7 @@ func UnprojectPerspective(depth []float32, w, h int, fx, fy, cx, cy float64) []V
 //
 //	x = (u - cx) * scale
 //	y = (cy - v) * scale
-//	z = d * scale
+//	z = -d * scale   ← d 是距离，越大越远；z 为负（相机在 +Z）
 //
 // 返回 nil 表示参数非法（同 UnprojectPerspective，且 scale 必须有限）。
 func UnprojectOrthographic(depth []float32, w, h int, scale, cx, cy float64) []Vec3 {
@@ -95,7 +101,7 @@ func UnprojectOrthographic(depth []float32, w, h int, scale, cx, cy float64) []V
 			out[row+x] = Vec3{
 				X: float32((u - cx) * scale),
 				Y: float32((cy - v) * scale),
-				Z: float32(float64(d) * scale),
+				Z: float32(-float64(d) * scale),
 			}
 		}
 	}

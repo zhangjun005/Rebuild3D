@@ -58,8 +58,9 @@ func TestBuildGeometryAndColor(t *testing.T) {
 	}
 	c := decodeResult(t, res)
 	for i := range c.Pos {
-		if !approx(c.Pos[i].Z, 2) {
-			t.Errorf("Pos[%d].Z = %v，期望 2", i, c.Pos[i].Z)
+		// 相机在 +Z 朝 -Z 看，深度 d=2 → z = -d = -2（docs/selection.md §4.4）。
+		if !approx(c.Pos[i].Z, -2) {
+			t.Errorf("Pos[%d].Z = %v，期望 -2", i, c.Pos[i].Z)
 		}
 		if c.Col[i] != (geometry.Color{R: 10, G: 20, B: 30}) {
 			t.Errorf("Col[%d] = %+v，期望纯色 (10,20,30)", i, c.Col[i])
@@ -72,8 +73,8 @@ func TestBuildGeometryAndColor(t *testing.T) {
 	if !approx(res.BBoxMin.Y, -0.5) || !approx(res.BBoxMax.Y, 0.5) {
 		t.Errorf("Y 包围盒 = [%v, %v]", res.BBoxMin.Y, res.BBoxMax.Y)
 	}
-	if !approx(res.BBoxMin.Z, 2) || !approx(res.BBoxMax.Z, 2) {
-		t.Errorf("Z 包围盒 = [%v, %v]", res.BBoxMin.Z, res.BBoxMax.Z)
+	if !approx(res.BBoxMin.Z, -2) || !approx(res.BBoxMax.Z, -2) {
+		t.Errorf("Z 包围盒 = [%v, %v]，期望 [-2, -2]", res.BBoxMin.Z, res.BBoxMax.Z)
 	}
 }
 
@@ -97,14 +98,14 @@ func TestBuildFocalFactorIsArtistic(t *testing.T) {
 	if tele.Focal != 2*wide.Focal {
 		t.Errorf("焦距未按系数缩放：%v vs %v", tele.Focal, wide.Focal)
 	}
-	// x 方向范围应减半（y 同理），z 不变。
+	// x 方向范围应减半（y 同理），z 不变（仍为 -d = -2）。
 	wWidth := wide.BBoxMax.X - wide.BBoxMin.X
 	tWidth := tele.BBoxMax.X - tele.BBoxMin.X
 	if !approx(tWidth, wWidth/2) {
 		t.Errorf("长焦 X 宽度 = %v，期望 %v（广角 %v）", tWidth, wWidth/2, wWidth)
 	}
-	if !approx(tele.BBoxMin.Z, 2) || !approx(tele.BBoxMax.Z, 2) {
-		t.Errorf("焦距不应影响 z：[%v,%v]", tele.BBoxMin.Z, tele.BBoxMax.Z)
+	if !approx(tele.BBoxMin.Z, -2) || !approx(tele.BBoxMax.Z, -2) {
+		t.Errorf("焦距不应影响 z：[%v,%v]，期望 [-2,-2]", tele.BBoxMin.Z, tele.BBoxMax.Z)
 	}
 }
 

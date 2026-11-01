@@ -232,7 +232,7 @@ func buildDepthPixel(depth []float32, w, h int, img image.Image, p Params, focal
 	// 自动体素的初值用源像素间距（中位深度 / focal），对飞点与包围盒离群值稳健。
 	spacingHint := 0.0
 	if focal > 0 {
-		spacingHint = medianZ(kept, 8192) / focal
+		spacingHint = medianDepth(kept, 8192) / focal
 	}
 	voxel := p.VoxelSize
 	switch {
@@ -377,8 +377,9 @@ func initialVoxelSize(pts []geometry.Vec3, maxPoints int, spacingHint float64) f
 	return 1 // 极端兜底：单位体素（调用方最多再迭代修正）
 }
 
-// medianZ 用采样近似中位深度（ILC1 里 z 就是深度）。
-func medianZ(pts []geometry.Vec3, maxSamples int) float64 {
+// medianDepth 用采样近似中位**深度距离**。
+// 反投影后 z = -d（d 是距离，越大越远），所以这里取 |z| 的中位数，与 z 的符号约定解耦。
+func medianDepth(pts []geometry.Vec3, maxSamples int) float64 {
 	if len(pts) == 0 {
 		return 0
 	}
@@ -388,7 +389,7 @@ func medianZ(pts []geometry.Vec3, maxSamples int) float64 {
 	}
 	vals := make([]float32, 0, len(pts)/step+1)
 	for i := 0; i < len(pts); i += step {
-		vals = append(vals, pts[i].Z)
+		vals = append(vals, float32(math.Abs(float64(pts[i].Z))))
 	}
 	sort.Slice(vals, func(i, j int) bool { return vals[i] < vals[j] })
 	mid := len(vals) / 2
