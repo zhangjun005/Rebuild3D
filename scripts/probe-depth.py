@@ -192,8 +192,10 @@ def main() -> int:
         dstat = stats(depth)
         np.save(outdir / f"{name}.depth.npy", depth)
 
-        # 归一化：用 1/99 分位裁剪，避免极端值吃掉对比度
-        lo, hi = np.percentile(depth[np.isfinite(depth)], [1, 99])
+        # 归一化：用 0.5/99.5 分位裁剪。
+        # 早先写的是 1/99，实测发现对少量图会裁掉过多有效层（见 scripts/analyze-depth.py 的分析），
+        # 信息损失应该尽量留在「缩放」，不要留在「裁剪」。
+        lo, hi = np.percentile(depth[np.isfinite(depth)], [0.5, 99.5])
         if hi - lo < 1e-9:
             norm = np.zeros_like(depth)
         else:
