@@ -15,8 +15,19 @@ const (
 	DefaultPython = `E:\conda\envs_dirs\illust3d\python.exe`
 	// DefaultScript 是 sidecar 入口脚本（相对进程工作目录，即仓库根目录）。
 	DefaultScript = `sidecar/server.py`
-	// DefaultRes 是默认 process_res（504px，8GB 显存上的实测配置）。
-	DefaultRes = 504
+	// DefaultRes 是默认 process_res（像素，长边）。
+	//
+	// 实测（平涂 4000px 图 + 点径 3 / softness 0.25 / posterize 10，400k 点）：
+	//
+	//	504： 峰值显存 2160 MiB / 推理 ~0.9s —— 遮挡边界只有 1~2px，
+	//	      边界像素深度混两层 → 反投影后位置错乱 → 主体边缘明显撕裂/锯齿
+	//	1008：峰值显存 3027 MiB / 推理 ~2.2s —— 边界有 2~4px 过渡，锯齿基本消失
+	//	      ← 新默认（8GB 显存下 <4GB 峰值，留足余量）
+	//	1344：峰值显存 3919 MiB / 推理 ~3.7s —— 画质更高但太慢，留作 -sidecar-res 显式选项
+	//
+	// 注意：process_res 决定**几何细节的真实上限**（边界/遮挡关系），
+	// 与 max_points（颜色覆盖密度）是两件事，不要互相替代。
+	DefaultRes = 1008
 	// maxRestarts 是 sidecar 崩溃后的重启上限：只重启一次，避免崩溃循环。
 	maxRestarts = 1
 )
@@ -27,7 +38,7 @@ type ManagerConfig struct {
 	Python string
 	// Script 是 sidecar 入口脚本；空则用 DefaultScript。
 	Script string
-	// ScriptArgs 是传给脚本的参数；nil 则用 ["--res", "504"]。
+	// ScriptArgs 是传给脚本的参数；nil 则用 ["--res", DefaultRes]。
 	ScriptArgs []string
 	// Dir 是工作目录；空表示继承当前进程（即仓库根目录）。
 	Dir string
