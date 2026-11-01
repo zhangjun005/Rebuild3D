@@ -137,6 +137,10 @@ async function boot(): Promise<void> {
     onLoadSample: () => {
       void reloadSample();
     },
+    onReset: () => {
+      viewer.resetView();
+      panel.sync();
+    },
   });
   viewer.onStats = (stats) => panel.updateStats(stats);
   // 拖拽会自动关掉摆动（viewer 内部改 params），面板要跟着更新勾选框

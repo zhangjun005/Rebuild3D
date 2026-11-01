@@ -48,7 +48,7 @@ const SLIDERS: readonly SliderDef[] = [
   { key: 'pointSize', label: '点大小', min: 0.5, max: 12, step: 0.1, digits: 1, visibleWhen: (p) => p.renderMode === 'cloud' },
   { key: 'density', label: '点数密度', min: 0.05, max: 1, step: 0.01, digits: 2, visibleWhen: (p) => p.renderMode === 'cloud' },
   { key: 'stippleScale', label: '点画尺度 px', min: 1.5, max: 10, step: 0.1, digits: 1, visibleWhen: (p) => p.renderMode === 'image' && p.halftone <= 0.001 && p.engraving <= 0.001 },
-  { key: 'inkGain', label: '结构增益', min: 1, max: 24, step: 0.5, digits: 1, visibleWhen: (p) => p.inkSource === 1 },
+  { key: 'inkGain', label: '结构增益', min: 1, max: 24, step: 0.5, digits: 1, visibleWhen: (p) => p.colorMode < 0.5 && p.inkSource === 1 },
   { key: 'stipple', label: '点画强度', min: 0, max: 1, step: 0.01, digits: 2, visibleWhen: (p) => p.halftone <= 0.001 && p.engraving <= 0.001 },
   { key: 'densityGamma', label: '明暗曲线', min: 0.4, max: 2.5, step: 0.05, digits: 2 },
   { key: 'edgeStrength', label: '描边强度', min: 0, max: 2, step: 0.05, digits: 2 },
@@ -108,12 +108,15 @@ export interface PanelOptions {
   onUpload: (file: File) => void;
   /** 回到内置 fixture 点云 */
   onLoadSample: () => void;
+  /** 回正：相机恢复基准位姿 */
+  onReset: () => void;
 }
 
 export class Panel {
   private readonly params: RenderParams;
   private readonly onChange: () => void;
   private readonly onExport: (request: ExportRequest) => void;
+  private readonly onResetAction: () => void;
   private readonly syncers: Array<() => void> = [];
   private readonly hud: HTMLElement;
   private readonly container: HTMLElement;
@@ -133,6 +136,7 @@ export class Panel {
     this.params = options.params;
     this.onChange = options.onChange;
     this.onExport = options.onExport;
+    this.onResetAction = options.onReset;
     this.hud = options.hud;
     this.container = options.container;
     this.preset = options.activePreset;
@@ -172,6 +176,7 @@ export class Panel {
     scrollArea.append(presets);
     this.setActivePreset(options.activePreset);
 
+
     // ── 墨量映射（第二层：这幅画该怎么读；两种模式共用）──
     for (const def of SELECTS) {
       scrollArea.append(this.buildSelect(def));
@@ -191,8 +196,14 @@ export class Panel {
     // ── 开关 ──
     scrollArea.append(this.buildToggle('colorMode', '保留原色（彩色点画）'));
     scrollArea.append(this.buildToggle('boil', '沸腾线（每 2~3 帧换相位）'));
-    scrollArea.append(this.buildToggle('autoSway', '自动运动（往返）'));
-    scrollArea.append(this.buildToggle('parallaxMode', '视差平移（不旋转，平板不变形）'));
+    const motionGrid = document.createElement('div');
+    motionGrid.className = 'grid2';
+    motionGrid.append(
+      this.buildToggle('autoSway', '自动运动（往返）'),
+      this.buildToggle('parallaxMode', '视差平移（自动）'),
+      this.buildToggle('freeRotate', '自由旋转（手动）'),
+    );
+    scrollArea.append(motionGrid);
 
     // ── 背景色（两列）──
     const colorGrid = document.createElement('div');
@@ -324,7 +335,7 @@ export class Panel {
   }
 
   private buildToggle(
-    key: 'boil' | 'autoSway' | 'threeQuarterView' | 'parallaxMode' | 'colorMode',
+    key: 'boil' | 'autoSway' | 'threeQuarterView' | 'parallaxMode' | 'colorMode' | 'freeRotate',
     labelText: string,
   ): HTMLElement {
     const row = document.createElement('div');
@@ -445,6 +456,18 @@ export class Panel {
   private buildOutputSection(): HTMLElement {
     const section = document.createElement('div');
     section.className = 'export';
+
+    // 回正（钉在底部，永远可见；用户要求：不限角度，但要能一键转回来）
+    const resetRow = document.createElement('div');
+    resetRow.className = 'row';
+    const resetButton = document.createElement('button');
+    resetButton.type = 'button';
+    resetButton.className = 'wide';
+    resetButton.textContent = '回正（回到正面基准）';
+    resetButton.title = '把相机恢复到进入时的基准位姿（正面 / 原距离）';
+    resetButton.addEventListener('click', () => this.onResetAction());
+    resetRow.append(resetButton);
+    section.append(resetRow);
 
     const sizeRow = document.createElement('div');
     sizeRow.className = 'row select';

@@ -288,6 +288,28 @@ ink      = max over j of  hatch(angle + j*45°, spacing*~0.9^j) * step(quantized
   `排线角度 °`、`色阶数`（3~5）
 - duotone 两端是普通参数：`背景/纸色` 与 `墨色`（新增），任何风格都能用
 
+## 交互：自由旋转 + 回正 + 主体前表面 pivot
+
+用户实测反馈「输入图片后就不能动了」。根因两个，都在交互层：
+
+1. **`enableRotate = !parallaxMode`** 把「自动运动的形态」和「手能不能转」绑死了：
+   `parallaxMode` 默认 true → 左键拖拽被 OrbitControls 完全忽略（滚轮还能用，所以像"半瘫"）。
+   现在**旋转永久可用**；`parallaxMode` 只决定自动运动是平移还是旋转。
+2. **"一拖拽就关自动运动"依赖 OrbitControls 的 `start` 事件** → 旋转被禁时不派发，
+   `autoSway` 一直 true，tick 里 `poseParallax()` 每帧覆盖相机位姿（即使 rotation 恢复了也会被拉回去）。
+   现在直接在 canvas 上监听 `pointerdown` / `wheel` → 立即 `autoSway = false` 并同步面板。
+
+另外两条用户明确要求：
+- **不限制旋转角度**（`freeRotate` 默认开）：只留 ±89° 俯仰防万向锁；
+  关掉开关才退回「基准 ± 摆动幅度」的旧限位。穿帮就穿帮，用户自己会转回来。
+- **回正按钮**（钉在底部输出区，永远可见）：`viewer.resetView()` 恢复 `frameCloud()` 算出的基准位姿。
+- **pivot = 主体前表面**：曾经用包围盒中心，而真实点云是「主体板 + 背景板」两层，
+  bbox 中心的 z 落在两层之间的空中 → 绕空中一点转、主体像被甩出去。
+  现在取**画面中心 35% 半径内点的 z 中位数**（`rho = hypot(x,y)/|z|` 衡量画面半径），
+  实测 `res1008-400k` 的 pivot z = −0.422，正落在主体板上。
+
+自检（`scripts/diag-drag.cjs`）：左键拖拽相机位移 **1.10**（修复前 0.0004）、拖拽后 `autoSway=false`、
+滚轮 0.826→0.607 正常、`resetView()` 回正到基准位姿、144fps。
 ## 导出 PNG（只出图片）
 
 面板底部只有一个输出区：**导出尺寸**（当前视口 / 1080×1080 方图 / 1920×1080）+ **导出 PNG** 按钮。

@@ -421,18 +421,26 @@ export class Viewer {
     this.controls.target.set(0.25, -0.05, -0.35);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.075;
-    this.controls.minDistance = 1.4;
-    this.controls.maxDistance = 14;
-    this.controls.maxPolarAngle = Math.PI * 0.492; // 不钻到地面以下
+    this.controls.minDistance = 0.05;
+    this.controls.maxDistance = 200;
+    // 旋转**永久可用**：parallaxMode 只决定"自动运动时是平移还是旋转"，不决定手能不能转。
+    // 角度**不设硬限位**（用户明确要求自由旋转，转到侧面看出是纸片也接受）；
+    // 只留 ±89° 俯仰防止万向锁把视角锁死。
+    this.controls.minPolarAngle = Math.PI * 0.0055; // ≈ +89°
+    this.controls.maxPolarAngle = Math.PI * 0.9945; // ≈ -89°
     this.controls.autoRotate = false; // 自动运动由我们的「摆动」接管，不用 autoRotate
     this.controls.update();
 
-    // 用户一拖拽就关掉自动摆动（否则手和自动运动会打架），并通知面板同步勾选框
-    this.controls.addEventListener('start', () => {
+    // 用户一按下鼠标就关掉自动运动（否则自动 pose 每帧覆盖相机，手和自动运动会打架）。
+    // ★ 不能依赖 OrbitControls 的 'start' 事件：旋转被禁用/阻尼态下它不一定派发，
+    //   实测会退化成"能缩放、但拖拽完全没反应"。直接在 canvas 上监听 pointerdown。
+    const stopAutoMotion = (): void => {
       if (!this.params.autoSway) return;
       this.params.autoSway = false;
       this.onInternalParamChange?.();
-    });
+    };
+    canvas.addEventListener('pointerdown', stopAutoMotion);
+    canvas.addEventListener('wheel', stopAutoMotion, { passive: true });
 
     // ── uniforms（先建对象，material 和 applyParams 共用同一份引用）──
     this.pointUniforms = {
@@ -702,11 +710,17 @@ export class Viewer {
 
     const count = position.count;
     const box = geometry.boundingBox ?? new THREE.Box3().setFromBufferAttribute(position);
-    const center = box.getCenter(new THREE.Vector3());
+    const boxCenter = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
     const diagonal = Math.max(size.length(), 1e-6);
 
-    // 核心半径（仍算了：给 OrbitControls 的缩放范围与视差幅度当"场景尺度"用）
+    // 旋转中心（pivot）= 主体**前表面**，不是包围盒中心。
+    // 真实插画的深度是「主体板 + 背景板」，包围盒中心的 z 落在两层之间的空处 →
+    // 绕空中一点旋转，观感很怪（点云像被甩出去）。取画面中心 35% 区域内点的 z 中位数，
+    // 基本就是主体板所在的深度。
+    const center = this.computePivot(position, boxCenter);
+
+    // 核心半径（给 OrbitControls 的缩放范围与视差幅度当"场景尺度"用）
     const radius = Math.max(this.percentileRadius(position, center, FRAME_RADIUS_PERCENTILE), 1e-6);
 
     const fovRad = THREE.MathUtils.degToRad(this.camera.fov);
@@ -1031,19 +1045,23 @@ export class Viewer {
   }
 
   /**
-   * 把 OrbitControls 的方位/俯仰限制在「取景基准 ± 摆动幅度」内。
+   * 手动旋转的角度范围。
    *
-   * 为什么必须限位：真实插画的深度只有剪影平板，转多了就露馅（go/no-go 结论）。
-   * 幅度 0 时把相机完全锁死在正面。
+   * - reeRotate = true（默认）：**不设方位限位**，俯仰只留 ±89° 防万向锁。
+   *   用户明确要求自由旋转——"转到侧面看出是纸片也接受，自己会转回来"。
+   * - reeRotate = false：退回旧的 ±摆动幅度 限位（幅度 0 时锁死正面）。
    */
   private applySwayLimits(): void {
+    if (this.params.freeRotate) {
+      this.controls.minAzimuthAngle = -Infinity;
+      this.controls.maxAzimuthAngle = Infinity;
+      this.controls.minPolarAngle = Math.PI * 0.0055; // ≈ +89°
+      this.controls.maxPolarAngle = Math.PI * 0.9945; // ≈ -89°
+      return;
+    }
     const amplitude = this.swayAmplitudeRad();
     this.controls.minAzimuthAngle = this.baseAzimuth - amplitude;
     this.controls.maxAzimuthAngle = this.baseAzimuth + amplitude;
-
-    // 俯仰限位按「基准极角 ± 俯仰幅度」对称设置。
-    // 不再卡「不钻到地面以下」——真实点云没有地面；正面基准（elevation=0）时
-    // 极角本来就是 90°，硬卡 88.6° 会让摆动变成单边。
     const basePolar = Math.PI / 2 - this.baseElevation;
     const pitchAmplitude = amplitude * SWAY_PITCH_RATIO;
     this.controls.minPolarAngle = THREE.MathUtils.clamp(
@@ -1070,6 +1088,23 @@ export class Viewer {
       distance,
     );
     this.controls.update();
+    this.renderFrame();
+  }
+
+  /**
+   * 回正：把相机恢复成 `frameCloud()` 算出的基准位姿（基准方位/仰角/距离，看向 pivot）。
+   * 用户要求「不要限制角度，但要能一键转回来」。
+   */
+  resetView(): void {
+    const center = this.frameInfo?.center ?? this.controls.target.clone();
+    const distance =
+      this.frameInfo?.distance ?? Math.max(this.camera.position.distanceTo(this.controls.target), 1e-3);
+    this.controls.target.copy(center);
+    this.poseFromOffsets(0, 0, distance);
+    this.controls.update();
+    this.captureParallaxBase();
+    // 回正后如果自动运动还开着，让它从基准姿态继续
+    this.lastTickAt = 0;
     this.renderFrame();
   }
 
@@ -1108,6 +1143,47 @@ export class Viewer {
       azimuthDeg: THREE.MathUtils.radToDeg(azimuth - this.baseAzimuth),
       elevationDeg: THREE.MathUtils.radToDeg(elevation - this.baseElevation),
     };
+  }
+
+  /**
+   * 旋转中心（pivot）：`(bbox 中心 x/y, 画面中心区域点的 z 中位数)`。
+   *
+   * 为什么要动 z：点云是「主体板 + 背景板」两层，bbox 中心的 z 在两层之间的空中，
+   * 绕那里旋转会让主体像被甩出去。画面中心 35% 半径内的点近似主体，取它们 z 的中位数
+   * 就落在主体前表面上。中心区域点太少时退回全点云 z 中位数。
+   *
+   * 画面半径用 rho = hypot(x, y) / |z| 衡量（与深度无关，等价于图像空间半径 / 焦距）。
+   */
+  private computePivot(position: THREE.BufferAttribute, boxCenter: THREE.Vector3): THREE.Vector3 {
+    const count = position.count;
+    const stride = Math.max(1, Math.floor(count / 20000));
+    const rhos: number[] = [];
+    const samples: Array<{ rho: number; z: number }> = [];
+    for (let i = 0; i < count; i += stride) {
+      const x = position.getX(i);
+      const y = position.getY(i);
+      const z = position.getZ(i);
+      const rho = Math.hypot(x, y) / Math.max(Math.abs(z), 1e-6);
+      rhos.push(rho);
+      samples.push({ rho, z });
+    }
+    if (samples.length === 0) return boxCenter.clone();
+
+    const median = (values: number[]): number => {
+      const sorted = [...values].sort((a, b) => a - b);
+      return sorted[Math.floor(sorted.length / 2)] as number;
+    };
+    const sortedRhos = [...rhos].sort((a, b) => a - b);
+    const rho95 = sortedRhos[Math.min(sortedRhos.length - 1, Math.floor(sortedRhos.length * 0.95))] as number;
+
+    const inner = samples.filter((s) => s.rho < rho95 * 0.35);
+    const zSource =
+      inner.length >= Math.max(50, samples.length * 0.02)
+        ? inner.map((s) => s.z)
+        : samples.map((s) => s.z);
+    const pivot = boxCenter.clone();
+    pivot.z = median(zSource);
+    return pivot;
   }
 
   /** 到 center 距离的第 p 分位（抽样计算，够用且快） */
@@ -1264,8 +1340,8 @@ export class Viewer {
     // 摆动幅度变了要重设角度限位（0 = 锁死正面）
     this.applySwayLimits();
 
-    // 运动模式切换：视差模式禁用旋转（拖动 = 平移）；切回来时把基准位姿对齐当前
-    this.controls.enableRotate = !p.parallaxMode;
+    // 旋转**永久可用**（parallaxMode 只决定自动运动的形态，不决定手能否转）
+    this.controls.enableRotate = true;
     if (p.parallaxMode !== this.parallaxMode) {
       this.parallaxMode = p.parallaxMode;
       if (p.parallaxMode) {

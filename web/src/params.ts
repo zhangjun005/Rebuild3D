@@ -119,6 +119,12 @@ export interface RenderParams {
   /** 自动运动开关（视差模式下来回平移；旋转模式下来回摆动） */
   autoSway: boolean;
   /**
+   * 自由旋转（默认开）：手动左键拖拽不受任何角度限制（只留 ±89° 俯仰防万向锁）。
+   * 关掉则退回「基准 ± 摆动幅度」的限位（旧的平板防穿帮行为）。
+   * 注意：它**只影响手动旋转**；自动运动是平移还是旋转仍由 parallaxMode 决定。
+   */
+  freeRotate: boolean;
+  /**
    * 旋转模式下的摆动幅度上限（度）：仅 `parallaxMode = false` 时生效。
    * 0 = 锁死正面；默认 15。
    */
@@ -166,6 +172,7 @@ const DEFAULTS = {
   threeQuarterView: false,
   parallaxMode: true,
   parallaxAmount: 4,
+  freeRotate: true,
   colorMode: 1,
   colorPosterize: 5,
   colorHalftone: 0,
