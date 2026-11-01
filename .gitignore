@@ -37,6 +37,9 @@ sidecar/vendor/Depth-Anything-3/
 # 小体积测试点云要保留
 !testdata/**/*.ply
 
+# 插画素材：用户自备，不进版本库（体积 + 版权）
+testdata/illustrations/
+
 # ── kron 运行时锁 ──
 .kron/.lock/
 
