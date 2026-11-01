@@ -19,6 +19,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 import depthFrag from './styles/depth.frag.glsl?raw';
+import engravingFrag from './styles/engraving.frag.glsl?raw';
 import halftoneFrag from './styles/halftone.frag.glsl?raw';
 import depthVert from './styles/depth.vert.glsl?raw';
 import pointsVert from './styles/points.vert.glsl?raw';
@@ -64,12 +65,25 @@ const POINT_SIZE_MAX = 8.0;
  * 方位摆动最能看出体积感，俯仰只给一点点，避免看到板的上下边缘。
  */
 const SWAY_PITCH_RATIO = 0.5;
-/** 摆动时允许的最低仰角（度），防止相机钻到地面以下 */
-const SWAY_MIN_ELEVATION_DEG = 4;
+/** 相机仰角的绝对上下限（度）：只做防翻转的保护，不再按地面高度硬卡（真实点云没有"地面"） */
+const ELEVATION_MIN_DEG = -80;
+const ELEVATION_MAX_DEG = 86;
 /** 实时预览的摆动周期（秒）。录制时周期由 N 帧决定，不用这个 */
 const LIVE_SWAY_PERIOD = 8;
 /** 摆动幅度的参数上限（度） */
 const SWAY_MAX_DEG = 45;
+
+/**
+ * 取景基准方向。
+ *
+ * **正面**（默认）：相机在 +Z 看向 -Z。深度图反投影的点云约定是
+ * +Z 朝观察者 / +X 右 / +Y 上（docs/selection.md §4.4），所以"插画本来的样子"
+ * 就是这个正面视角；3/4 视角等于把画斜过来看。
+ *
+ * 3/4：只适合看 fixture（球+立方体）的立体感，调试用开关。
+ */
+const BASE_DIR_FRONT = new THREE.Vector3(0, 0, 1);
+const BASE_DIR_THREE_QUARTER = new THREE.Vector3(0.34, 0.36, 0.87);
 
 /** 沸腾：一个可回绕循环的「逻辑帧」数（60 fps 下 0.8 s） */
 const BOIL_CYCLE_FRAMES = 48;
@@ -206,6 +220,18 @@ interface HalftoneUniforms extends CompositeUniforms {
   uHalftoneOffset: THREE.IUniform<THREE.Vector2>;
 }
 
+/** 铜版画的合成 pass uniform（排线相关） */
+interface EngravingUniforms extends CompositeUniforms {
+  uPaper: THREE.IUniform<THREE.Color>;
+  uEngravingStrength: NumericUniform;
+  uHatchLayers: NumericUniform;
+  uHatchSpacing: NumericUniform;
+  uHatchAngle: NumericUniform;
+  uPosterizeLevels: NumericUniform;
+  uDensityGamma: NumericUniform;
+  uScreenOffset: THREE.IUniform<THREE.Vector2>;
+}
+
 /** 配置 blue noise 纹理（点画阈值 + 纸颗粒共用） */
 export function configureBlueNoiseTexture(texture: THREE.Texture): THREE.Texture {
   texture.wrapS = THREE.RepeatWrapping;
@@ -246,12 +272,15 @@ export class Viewer {
   private readonly compositeMaterial: THREE.ShaderMaterial;
   /** 半调漫画的合成 pass（params.halftone > 0 时使用） */
   private readonly halftoneMaterial: THREE.ShaderMaterial;
+  /** 铜版画的合成 pass（params.engraving > 0 时使用） */
+  private readonly engravingMaterial: THREE.ShaderMaterial;
 
   private readonly pointUniforms: PointUniforms;
   private readonly depthUniforms: DepthUniforms;
   private readonly smoothUniforms: SmoothUniforms;
   private readonly compositeUniforms: CompositeUniforms;
   private readonly halftoneUniforms: HalftoneUniforms;
+  private readonly engravingUniforms: EngravingUniforms;
 
   private readonly quadScene = new THREE.Scene();
   private readonly quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
@@ -294,6 +323,11 @@ export class Viewer {
   private baseElevation = 0;
   /** 实时摆动时钟（秒，mod LIVE_SWAY_PERIOD） */
   private swayClock = 0;
+  /** 当前点云（基准视角切换时要重新取景） */
+  private cloudGeometry: THREE.BufferGeometry | null = null;
+  private cloudPosition: THREE.BufferAttribute | null = null;
+  /** 当前基准视角是否 3/4（用于检测开关变化） */
+  private threeQuarterView = false;
   /** 参数被内部改动（例如拖拽自动关掉摆动）时通知面板同步 */
   onInternalParamChange: (() => void) | null = null;
 
@@ -458,6 +492,27 @@ export class Viewer {
       depthWrite: false,
     });
 
+    // 铜版画的合成 pass：同一份 tColor/tDepth，换成排线 + posterize + duotone
+    this.engravingUniforms = {
+      ...this.compositeUniforms,
+      uPaper: this.pointUniforms.uPaper,
+      uEngravingStrength: { value: this.params.engraving },
+      uHatchLayers: { value: this.params.hatchLayers },
+      uHatchSpacing: { value: this.params.hatchSpacing },
+      uHatchAngle: { value: THREE.MathUtils.degToRad(this.params.hatchAngle) },
+      uPosterizeLevels: { value: this.params.posterizeLevels },
+      uDensityGamma: { value: this.params.densityGamma },
+      uScreenOffset: { value: new THREE.Vector2() },
+    };
+    this.engravingMaterial = new THREE.ShaderMaterial({
+      name: 'engraving/composite',
+      uniforms: this.engravingUniforms as unknown as Record<string, THREE.IUniform>,
+      vertexShader: quadVert,
+      fragmentShader: engravingFrag,
+      depthTest: false,
+      depthWrite: false,
+    });
+
     this.quadMesh = new THREE.Mesh(this.quadGeometry, this.smoothMaterial);
     this.quadMesh.frustumCulled = false;
     this.quadScene.add(this.quadMesh);
@@ -509,7 +564,14 @@ export class Viewer {
    *   - 空气透视 / 描边归一化的深度区间 → 同上
    *   - 点大小 → 由估算的「屏幕点间距」决定，点数变少时点自动变大，覆盖率不塌
    */
-  private frameCloud(geometry: THREE.BufferGeometry, position: THREE.BufferAttribute): void {
+  private frameCloud(
+    geometry: THREE.BufferGeometry,
+    position: THREE.BufferAttribute,
+    options: { preservePointSize?: boolean; preserveDistance?: number } = {},
+  ): void {
+    this.cloudGeometry = geometry;
+    this.cloudPosition = position;
+
     const count = position.count;
     const box = geometry.boundingBox ?? new THREE.Box3().setFromBufferAttribute(position);
     const center = box.getCenter(new THREE.Vector3());
@@ -522,11 +584,14 @@ export class Viewer {
     const fovRad = THREE.MathUtils.degToRad(this.camera.fov);
     const fitDistance = (radius / Math.sin(fovRad / 2)) * FRAME_MARGIN;
 
-    // 相机方向保持 3/4 俯视（艺术取景，不是自动寻找最佳视角）
-    const dir = new THREE.Vector3(0.34, 0.36, 0.87).normalize();
+    // 基准方向：正面（默认）或 3/4（调试开关）
+    this.threeQuarterView = this.params.threeQuarterView;
+    const dir = (
+      this.threeQuarterView ? BASE_DIR_THREE_QUARTER : BASE_DIR_FRONT
+    ).clone().normalize();
     this.controls.target.copy(center);
 
-    // 取景基准位姿：摆动与角度限位都围绕它（真实插画→这一对角度就是深度图的正面方向）
+    // 取景基准位姿：摆动与角度限位都围绕它
     this.baseAzimuth = Math.atan2(dir.x, dir.z);
     this.baseElevation = Math.asin(dir.y);
 
@@ -536,30 +601,45 @@ export class Viewer {
 
     this.controls.minDistance = radius * 0.25;
     this.controls.maxDistance = fitDistance * 6;
-    this.poseFromOffsets(0, 0, fitDistance);
+    this.poseFromOffsets(0, 0, options.preserveDistance ?? fitDistance);
     this.applySwayLimits();
     this.controls.update();
 
-    this.frameInfo = { center: center.clone(), radius, distance: fitDistance };
+    this.frameInfo = {
+      center: center.clone(),
+      radius,
+      distance: options.preserveDistance ?? fitDistance,
+    };
 
     // 尺度相关参数：换尺度后观感保持一致
-    this.refDepth = fitDistance * 0.91;
-    this.depthNear = fitDistance * 0.57;
-    this.depthFar = fitDistance * 1.82;
+    this.refDepth = (options.preserveDistance ?? fitDistance) * 0.91;
+    this.depthNear = (options.preserveDistance ?? fitDistance) * 0.57;
+    this.depthFar = (options.preserveDistance ?? fitDistance) * 1.82;
     this.applyDepthRange();
 
     // 点大小自适应：点云来自深度图，基本是 2.5D 面 → 间距 ≈ 对角线 / sqrt(点数)
-    const spacingWorld = diagonal / Math.sqrt(count);
-    const cssHeight = Math.max(window.innerHeight, 1);
-    const pxPerWorldAtRef = (cssHeight * 0.5) / Math.tan(fovRad / 2) / this.refDepth;
-    const spacingPx = spacingWorld * pxPerWorldAtRef;
-    const autoPointSize = THREE.MathUtils.clamp(
-      spacingPx * POINT_SIZE_PER_SPACING,
-      POINT_SIZE_MIN,
-      POINT_SIZE_MAX,
-    );
-    this.params.pointSize = autoPointSize;
+    if (!options.preservePointSize) {
+      const spacingWorld = diagonal / Math.sqrt(count);
+      const cssHeight = Math.max(window.innerHeight, 1);
+      const pxPerWorldAtRef = (cssHeight * 0.5) / Math.tan(fovRad / 2) / this.refDepth;
+      const spacingPx = spacingWorld * pxPerWorldAtRef;
+      this.params.pointSize = THREE.MathUtils.clamp(
+        spacingPx * POINT_SIZE_PER_SPACING,
+        POINT_SIZE_MIN,
+        POINT_SIZE_MAX,
+      );
+    }
     this.applyParams();
+  }
+
+  /** 基准视角切换后重新取景（保持当前点大小与视距） */
+  private reframeForBaseView(): void {
+    if (!this.cloudGeometry || !this.cloudPosition) return;
+    const distance = this.camera.position.distanceTo(this.controls.target);
+    this.frameCloud(this.cloudGeometry, this.cloudPosition, {
+      preservePointSize: true,
+      preserveDistance: distance,
+    });
   }
 
   /**
@@ -570,8 +650,8 @@ export class Viewer {
     const azimuth = this.baseAzimuth + azimuthOffsetRad;
     const elevation = THREE.MathUtils.clamp(
       this.baseElevation + elevationOffsetRad,
-      THREE.MathUtils.degToRad(SWAY_MIN_ELEVATION_DEG),
-      Math.PI / 2 - 0.05,
+      THREE.MathUtils.degToRad(ELEVATION_MIN_DEG),
+      THREE.MathUtils.degToRad(ELEVATION_MAX_DEG),
     );
     const cosElevation = Math.cos(elevation);
     const target = this.controls.target;
@@ -602,10 +682,21 @@ export class Viewer {
     this.controls.minAzimuthAngle = this.baseAzimuth - amplitude;
     this.controls.maxAzimuthAngle = this.baseAzimuth + amplitude;
 
+    // 俯仰限位按「基准极角 ± 俯仰幅度」对称设置。
+    // 不再卡「不钻到地面以下」——真实点云没有地面；正面基准（elevation=0）时
+    // 极角本来就是 90°，硬卡 88.6° 会让摆动变成单边。
     const basePolar = Math.PI / 2 - this.baseElevation;
     const pitchAmplitude = amplitude * SWAY_PITCH_RATIO;
-    this.controls.minPolarAngle = Math.max(0.05, basePolar - pitchAmplitude);
-    this.controls.maxPolarAngle = Math.min(Math.PI * 0.492, basePolar + pitchAmplitude);
+    this.controls.minPolarAngle = THREE.MathUtils.clamp(
+      basePolar - pitchAmplitude,
+      0.05,
+      Math.PI - 0.05,
+    );
+    this.controls.maxPolarAngle = THREE.MathUtils.clamp(
+      basePolar + pitchAmplitude,
+      0.05,
+      Math.PI - 0.05,
+    );
   }
 
   /**
@@ -688,6 +779,7 @@ export class Viewer {
 
     this.paperColor.set(p.paper);
     this.pointUniforms.uPaper.value = this.paperColor;
+    this.inkColor.set(p.ink);
 
     this.pointUniforms.uPointSize.value = p.pointSize;
     this.pointUniforms.uSoftness.value = p.softness;
@@ -709,8 +801,21 @@ export class Viewer {
     this.halftoneUniforms.uHalftoneAngle.value = THREE.MathUtils.degToRad(p.halftoneAngle);
     this.halftoneUniforms.uDensityGamma.value = p.densityGamma;
 
+    // 铜版画（排线在合成 pass 里做）
+    this.engravingUniforms.uEngravingStrength.value = p.engraving;
+    this.engravingUniforms.uHatchLayers.value = p.hatchLayers;
+    this.engravingUniforms.uHatchSpacing.value = p.hatchSpacing;
+    this.engravingUniforms.uHatchAngle.value = THREE.MathUtils.degToRad(p.hatchAngle);
+    this.engravingUniforms.uPosterizeLevels.value = p.posterizeLevels;
+    this.engravingUniforms.uDensityGamma.value = p.densityGamma;
+
     // 摆动幅度变了要重设角度限位（0 = 锁死正面）
     this.applySwayLimits();
+
+    // 基准视角切换（正面 ↔ 3/4）需要重新取景
+    if (p.threeQuarterView !== this.threeQuarterView) {
+      this.reframeForBaseView();
+    }
   }
 
   // ── 尺寸 ────────────────────────────────────────────────────────────────
@@ -854,6 +959,7 @@ export class Viewer {
       this.compositeUniforms.uBoilJitter.value.set(0, 0);
       this.compositeUniforms.uBoilFlicker.value = 0;
       this.halftoneUniforms.uHalftoneOffset.value.set(0, 0);
+      this.engravingUniforms.uScreenOffset.value.set(0, 0);
       return;
     }
 
@@ -874,6 +980,11 @@ export class Viewer {
     // §3 抖动换序：网点网格按相位整体平移（< 一个 cell），网点「重排」而不是闪`r
     const cell = Math.max(this.halftoneUniforms.uHalftoneCell.value, 2);
     this.halftoneUniforms.uHalftoneOffset.value.set((r2 - 0.5) * cell * 0.7, (r3 - 0.5) * cell * 0.7);
+    const hatchSpacing = Math.max(this.engravingUniforms.uHatchSpacing.value, 2);
+    this.engravingUniforms.uScreenOffset.value.set(
+      (r2 - 0.5) * hatchSpacing,
+      (r3 - 0.5) * hatchSpacing,
+    );
   }
 
   // ── 录制 / 出帧 ────────────────────────────────────────────────────────
@@ -1037,9 +1148,15 @@ export class Viewer {
     this.compositeUniforms.tDepth.value = smoothTarget.texture;
     this.halftoneUniforms.tColor.value = colorTarget.texture;
     this.halftoneUniforms.tDepth.value = smoothTarget.texture;
-    // 网点强度 > 0 时切到半调漫画的合成 pass
+    this.engravingUniforms.tColor.value = colorTarget.texture;
+    this.engravingUniforms.tDepth.value = smoothTarget.texture;
+    // L2 风格层三选一：排线（铜版画）> 网点（半调）> 点云自带点画
     this.quadMesh.material =
-      this.params.halftone > 0.001 ? this.halftoneMaterial : this.compositeMaterial;
+      this.params.engraving > 0.001
+        ? this.engravingMaterial
+        : this.params.halftone > 0.001
+          ? this.halftoneMaterial
+          : this.compositeMaterial;
     renderer.render(this.quadScene, this.quadCamera);
   }
 
@@ -1097,6 +1214,7 @@ export class Viewer {
     this.smoothMaterial.dispose();
     this.compositeMaterial.dispose();
     this.halftoneMaterial.dispose();
+    this.engravingMaterial.dispose();
     this.quadGeometry.dispose();
     this.colorTarget?.dispose();
     this.depthTarget?.dispose();

@@ -56,6 +56,11 @@ const SLIDERS: readonly SliderDef[] = [
   { key: 'halftone', label: '半调网点', min: 0, max: 1, step: 0.01, digits: 2 },
   { key: 'halftoneCell', label: '网点大小 px', min: 3, max: 14, step: 0.5, digits: 1, dependsOn: { key: 'halftone', above: 0.001 } },
   { key: 'halftoneAngle', label: '网屏角度 °', min: 0, max: 90, step: 1, digits: 0, dependsOn: { key: 'halftone', above: 0.001 } },
+  { key: 'engraving', label: '铜版画排线', min: 0, max: 1, step: 0.01, digits: 2 },
+  { key: 'hatchLayers', label: '排线层数', min: 2, max: 4, step: 1, digits: 0, dependsOn: { key: 'engraving', above: 0.001 } },
+  { key: 'hatchSpacing', label: '排线间距 px', min: 3, max: 12, step: 0.5, digits: 1, dependsOn: { key: 'engraving', above: 0.001 } },
+  { key: 'hatchAngle', label: '排线角度 °', min: 0, max: 180, step: 1, digits: 0, dependsOn: { key: 'engraving', above: 0.001 } },
+  { key: 'posterizeLevels', label: '色阶数', min: 3, max: 5, step: 1, digits: 0, dependsOn: { key: 'engraving', above: 0.001 } },
 ];
 
 export interface PanelOptions {
@@ -136,9 +141,11 @@ export class Panel {
     // ── 开关 ──
     scrollArea.append(this.buildToggle('boil', '沸腾线（每 2~3 帧换相位）'));
     scrollArea.append(this.buildToggle('autoSway', '自动摆动（±15° 来回，不转圈）'));
+    scrollArea.append(this.buildToggle('threeQuarterView', '3/4 基准视角（仅调试 fixture）'));
 
     // ── 背景色 ──
     scrollArea.append(this.buildColor('paper', '背景 / 纸色'));
+    scrollArea.append(this.buildColor('ink', '墨色'));
 
     panel.append(scrollArea);
     panel.append(document.createElement('hr'));
@@ -197,7 +204,7 @@ export class Panel {
     return row;
   }
 
-  private buildToggle(key: 'boil' | 'autoSway', labelText: string): HTMLElement {
+  private buildToggle(key: 'boil' | 'autoSway' | 'threeQuarterView', labelText: string): HTMLElement {
     const row = document.createElement('div');
     row.className = 'row check';
 
@@ -221,7 +228,7 @@ export class Panel {
     return row;
   }
 
-  private buildColor(key: 'paper', labelText: string): HTMLElement {
+  private buildColor(key: 'paper' | 'ink', labelText: string): HTMLElement {
     const row = document.createElement('div');
     row.className = 'row color';
 

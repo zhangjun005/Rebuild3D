@@ -66,6 +66,15 @@ async function boot(): Promise<void> {
   // 2) Viewer（渲染管线）
   const viewer = new Viewer(canvas, noise);
 
+  // URL 开关：?baseView=threeQuarter / ?baseView=3q 用 3/4 基准视角（看 fixture 的立体感）
+  // 默认是**正面**基准：深度图反投影的点云 +Z 朝观察者，作品本来的样子就是正面。
+  const query = new URLSearchParams(window.location.search);
+  const baseView = query.get('baseView');
+  if (baseView === 'threeQuarter' || baseView === '3q') {
+    viewer.params.threeQuarterView = true;
+    viewer.setParams(viewer.params);
+  }
+
   // 3) 面板
   const panel = new Panel({
     container: panelElement,
