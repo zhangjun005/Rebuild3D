@@ -62,16 +62,16 @@ func UnprojectPerspective(depth []float32, w, h int, fx, fy, cx, cy float64) []V
 // UnprojectOrthographic 用正交投影把深度图反投影成点云。
 //
 // 参数：
-//   - depth: 长度至少 w*h 的深度图（直接作为 z 坐标）；
+//   - depth: 长度至少 w*h 的深度图；
 //   - w, h:  图像宽高；
-//   - scale: 每个像素对应的世界单位（x、y 同比例；scale 越大点云越"散"）；
+//   - scale: 每个像素对应的世界单位（x、y、z 同比例，见 docs/selection.md §4.4）；
 //   - cx, cy: 主点像素坐标。
 //
 // 像素取中心坐标，变换为
 //
 //	x = (u - cx) * scale
 //	y = (cy - v) * scale
-//	z = d
+//	z = d * scale
 //
 // 返回 nil 表示参数非法（同 UnprojectPerspective，且 scale 必须有限）。
 func UnprojectOrthographic(depth []float32, w, h int, scale, cx, cy float64) []Vec3 {
@@ -95,7 +95,7 @@ func UnprojectOrthographic(depth []float32, w, h int, scale, cx, cy float64) []V
 			out[row+x] = Vec3{
 				X: float32((u - cx) * scale),
 				Y: float32((cy - v) * scale),
-				Z: d,
+				Z: float32(float64(d) * scale),
 			}
 		}
 	}

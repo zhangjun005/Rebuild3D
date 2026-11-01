@@ -85,11 +85,12 @@ func TestUnprojectParamErrors(t *testing.T) {
 func TestUnprojectOrthographic(t *testing.T) {
 	depth := []float32{1, 2, 3, 4}
 	got := UnprojectOrthographic(depth, 2, 2, 0.5, 1, 1)
+	// docs/selection.md §4.4：正交投影 z = d * scale。
 	want := []Vec3{
-		{X: -0.25, Y: 0.25, Z: 1},
-		{X: 0.25, Y: 0.25, Z: 2},
-		{X: -0.25, Y: -0.25, Z: 3},
-		{X: 0.25, Y: -0.25, Z: 4},
+		{X: -0.25, Y: 0.25, Z: 0.5},
+		{X: 0.25, Y: 0.25, Z: 1},
+		{X: -0.25, Y: -0.25, Z: 1.5},
+		{X: 0.25, Y: -0.25, Z: 2},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("点数 = %d，期望 %d", len(got), len(want))
@@ -100,7 +101,7 @@ func TestUnprojectOrthographic(t *testing.T) {
 		}
 	}
 
-	// scale 翻倍 → x/y 偏移翻倍。
+	// scale=1 时 z 就是深度；x/y 偏移 = 半像素 * scale。
 	doubled := UnprojectOrthographic([]float32{1}, 1, 1, 1, 0, 0)
 	if want := (Vec3{X: 0.5, Y: -0.5, Z: 1}); !vecEqual(doubled[0], want) {
 		t.Errorf("scale 测试 got %+v，期望 %+v", doubled[0], want)
