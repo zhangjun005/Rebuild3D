@@ -98,14 +98,15 @@ const IMAGE_EDGE_THRESHOLD_SCALE = 0.4;
 /**
  * 取景基准方向 = 相机相对点云中心的方向（相机在 center + dir·distance）。
  *
- * ★ 必须是 **-Z**：Depth-Anything 一类单目深度模型输出的是「距离型深度」（越大越远），
- *   Go 侧按 x=(u-cx)z/f、z=d 反投影（docs/selection.md §4.4），所以点云的 z 越大越远。
- *   相机放在 +Z 会把远近看反：背景跑到主体前面、空气透视把主体洗白、按深度上墨把墨上到背景。
- *   实测（平涂131905131）：画面外围（背景）z≈0.86，中心（主体）z≈0.48。
- *   相机放 -Z 沿 +Z 看 = 「正对画面」的正确方位。
+ * 约定（docs/selection.md §4.4）：深度 d 是距离（越大越远），Go 反投影输出 z = -d，
+ * 所以点云的 z 越大 = 越靠近观察者。相机在 +Z 沿 -Z 看（three.js 默认朝向）就是「正对画面」。
+ *
+ * 曾经 Go 输出 z = d（远处 z 更大）而渲染层把相机放在 -Z 才「看起来对」——那是两端各自
+ * 合理、合起来双重取反的经典坑（雾/深度上墨/视差三条症状同时反向）。符号现在统一在 Go 侧，
+ * 渲染层用标准相机。验证方式：量 z，主体应比背景大（更靠近观察者）；别靠"看着好看"判断。
  */
-const BASE_DIR_FRONT = new THREE.Vector3(0, 0, -1);
-const BASE_DIR_THREE_QUARTER = new THREE.Vector3(0.34, 0.36, -0.87);
+const BASE_DIR_FRONT = new THREE.Vector3(0, 0, 1);
+const BASE_DIR_THREE_QUARTER = new THREE.Vector3(0.34, 0.36, 0.87);
 
 /** 沸腾：一个可回绕循环的「逻辑帧」数（60 fps 下 0.8 s） */
 const BOIL_CYCLE_FRAMES = 48;
