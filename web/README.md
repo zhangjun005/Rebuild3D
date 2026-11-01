@@ -5,6 +5,7 @@
 
 第一阶段实现的是 §7 的第一套预设「**点画印刷**」：
 L1 软边圆片 + L2 blue noise 点画 + L2 深度描边 + L3 沸腾 + L4 空气透视 / 单色墨点。
+A 阶段加上**循环动图导出**（WebM 录制 / 帧序列 PNG / 无缝自检）。
 
 技术栈：**Vite + TypeScript（strict）+ three.js，无框架**。shader 全部独立成 `.glsl` 文件，用 `?raw` 导入。
 
@@ -26,6 +27,64 @@ npm run gen:noise  # 重新生成 src/assets/blue-noise.png（一次就够，产
 生产环境换成 Go 的 `GET /api/cloud/{id}`（同样的 ILC1 字节流，见 `docs/selection.md` §4.2），
 `src/ilcl.ts` 里的候选来源列表已经留好了这个回退。
 
+## 循环动图导出（A 阶段）
+
+面板底部「循环动图导出」：时长 4 / 6 / 10 s、尺寸 `1080×1080`（默认）/ `1920×1080` / 当前视口，
+三个动作：**录制 WebM**、**导出帧序列**、**无缝自检**。
+文件名带预设与关键参数：`stipple-print_g1.3_d0.9_p2.49_e1_1080x1080_6s.webm`
+（`g`=明暗曲线 `d`=点画强度 `p`=点大小 `e`=描边强度）。
+
+### 无缝循环的对齐算式
+
+捕获不走真实时间：`Viewer.beginCapture()` 把一切随时间变化的状态变成**帧索引 i 的纯函数**。
+
+```
+输出帧率 30 fps（固定，不跟显示器 144Hz 走）
+N 帧 = seconds × 30            （4s→120、6s→180、10s→300）
+
+旋转:   azimuth(i) = azimuth0 + 2π · turns · (i mod N) / N        turns = 1
+沸腾:   framesPerPhase = 30 / boilHz = 3   （按能整除 N 取整）
+        phases = N / framesPerPhase
+        phase(i) = floor((i mod N) / framesPerPhase) mod phases
+```
+
+因为两边都先取模，`i = N` 与 `i = 0` 逐位相同；
+而 `i` 从 `N-1` 走到 `0` 的一步正好是 `2π·turns/N`（旋转连续）和一个相位切换的边界（沸腾连续）。
+所以「N 帧、首尾相接」本身就是无缝循环，**不需要裁帧**。
+
+> 注意：实时视图里的沸腾是 **0.8 s / 8 相** 的循环，6 s 不是它的整数倍 —— 所以录制时
+> **不能**复用那个时钟，而是按 `N` 重新推导相位（重绘频率仍是 10 Hz，`3` 帧一相 ×
+> `N/3` 相）。这就是「T 必须是 0.8 s 整数倍」那个限制的解除办法：把相位按循环长度归一化。
+> 约束只剩一条：`N % 3 == 0`（4/6/10 s 都满足）。
+
+其它随时间变的量：`fogAmount` / 描边参数都是静态的；相机在捕获期间**完全由上面的公式覆写**
+（`controls.enabled = false`），`autoRotate` 不参与；所以没有第三个时间源。
+
+### 证据（实测，headless chromium / RTX 4060）
+
+| 项 | 结果 |
+|---|---|
+| 无缝自检（index 0 vs index N 的 PNG SHA-256） | **相同**（`bf26ca5af35f…`） |
+| 录出的 WebM | VP9 · 1080×1080 · 120 帧 · 7.40 MB（4s） |
+| 回读时长 | 3.978 s vs 理论 `(N-1)/30 = 3.967 s` → 正好 N 帧，**无首尾重复帧** |
+| 录制期间渲染循环 | 140~144 fps（rAF 未卡） |
+| 帧序列 | 120 帧 PNG / 252.3 MB（1080² 每帧 ≈ 2.1 MB） |
+
+产物与截图在 `web/.shots/capture/`（`.webm` 可直接播）、`web/.shots/16~19-export-*.png`。
+
+### 帧序列接口（给 Go 侧 `image/gif` 编码）
+
+```js
+// N 帧 PNG Blob 数组（首尾相接即无缝循环）
+const frames = await window.illust3d.captureFrames(180);                       // 1080×1080
+const small  = await window.illust3d.captureFrames(180, { size: { width: 540, height: 540 } });
+await window.illust3d.recordWebM(6, 'square');   // → { blob, plan, mimeType }
+await window.illust3d.verifySeam(6, 'square');   // → { identical, hashFirst, hashWrap, plan }
+```
+
+GIF 编码不在前端做（不引第三方库）。注意 PNG 很大（1080² 每帧约 2.1 MB），
+Go 侧建议按 **540~720 px** 取帧、或分块接收，别一次性传 180 × 2 MB。
+
 ## 操作
 
 拖拽旋转 · 滚轮缩放 · `H` 收起面板。
@@ -40,6 +99,7 @@ window.illust3d.stats()       // { fps, frame, points, drawCalls, boilPhase, wid
 window.illust3d.viewer        // Viewer 实例
 window.illust3d.syncPanel?.() // 直接改 viewer.params 后刷新面板显示
 window.illust3d.loadILC1?(buf, 'label') // 换一份 ILC1 点云（真实深度点云/测试用），返回点数
+window.illust3d.captureFrames?(180)     // 帧序列 PNG Blob[]（见上面「循环动图导出」）
 ```
 
 ## 自适应（真实点云不等于测试点云）
@@ -77,6 +137,7 @@ web/
     viewer.ts                # 渲染核心：4 个 pass、uniform 管理、沸腾时钟、FPS
     ilcl.ts                  # ILC1 解析（零拷贝视图）+ 来源回退
     params.ts                # 参数类型 + 三套预设
+    capture.ts               # A 阶段：WebM 录制 / 帧序列 / 无缝自检 / 文件名
     panel.ts                 # 纯 DOM 控制面板
     assets/blue-noise.png    # 由 scripts/gen-blue-noise.mjs 生成
     styles/                  # 全部 GLSL

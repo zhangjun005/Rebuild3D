@@ -40,7 +40,7 @@
         width: 268px;
         max-height: calc(100vh - 24px);
         overflow-y: auto;
-        padding: 12px 14px 14px;
+        padding: 10px 12px 12px;
         border-radius: 10px;
         background: var(--ui-bg);
         backdrop-filter: blur(10px);
@@ -52,7 +52,7 @@
         display: none;
       }
       #panel h1 {
-        margin: 0 0 10px;
+        margin: 0 0 8px;
         font-size: 13px;
         font-weight: 600;
         letter-spacing: 0.04em;
@@ -87,7 +87,7 @@
         background: rgba(216, 162, 74, 0.14);
       }
       .row {
-        margin: 8px 0;
+        margin: 6px 0;
       }
       .row label {
         display: flex;
@@ -136,7 +136,7 @@
       hr {
         border: none;
         border-top: 1px solid rgba(255, 255, 255, 0.09);
-        margin: 10px 0;
+        margin: 8px 0;
       }
       #hud {
         position: fixed;
@@ -158,6 +158,75 @@
         margin-top: 8px;
         font-size: 10.5px;
         color: var(--ui-dim);
+      }
+
+      /* ── 导出区 ── */
+      .export-title {
+        font-size: 11px;
+        letter-spacing: 0.04em;
+        color: var(--ui-accent);
+        margin: 0 0 7px;
+      }
+      .row.select {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin: 6px 0;
+        font-size: 11.5px;
+        color: var(--ui-fg);
+      }
+      .row.select select {
+        flex: 1;
+        min-width: 0;
+        padding: 4px 6px;
+        font-size: 11px;
+        border-radius: 5px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--ui-fg);
+      }
+      .export-buttons {
+        display: flex;
+        gap: 6px;
+        margin: 9px 0 7px;
+      }
+      .export-buttons button {
+        flex: 1;
+        padding: 6px 3px;
+        font-size: 10.5px;
+        border-radius: 6px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: rgba(255, 255, 255, 0.08);
+        color: var(--ui-fg);
+        cursor: pointer;
+      }
+      .export-buttons button:hover:not(:disabled) {
+        border-color: var(--ui-accent);
+        color: var(--ui-accent);
+      }
+      .export-buttons button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .export-status {
+        min-height: 15px;
+        font-size: 10.5px;
+        line-height: 1.5;
+        color: var(--ui-dim);
+        white-space: pre-wrap;
+      }
+      #panel.busy {
+        opacity: 0.8;
+      }
+
+      /* 录制时把画布按输出比例居中显示（画布内容才是被录下来的东西） */
+      body.capturing #view {
+        inset: auto;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12);
       }
     </style>
   </head>

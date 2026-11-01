@@ -82,6 +82,50 @@ export interface ViewerStats {
   coreRadius: number;
   /** 当前点大小（CSS px @ 参考深度） */
   pointSize: number;
+  /** 是否正在录制/出帧 */
+  capturing: boolean;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 录制 / 出帧：固定 30fps 的确定性时钟
+//
+// 关键：**不走真实时间**。捕获时一切随时间变化的状态都由「帧索引 i」直接算出来：
+//   旋转方位角 azimuth(i) = azimuth0 + 2π · turns · (i mod N) / N
+//   沸腾相位   phase(i)   = floor((i mod N) / framesPerPhase) mod phases
+// 于是状态是 i 的纯函数，且 i = N 与 i = 0 逐位相同（因为先取模），
+// 这就是无缝循环的形式化保证（对齐算式见 README / 报告）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 捕获的固定输出帧率：不跟显示器刷新率走（144Hz 屏上录出来也是稳定的 30fps） */
+export const CAPTURE_FPS = 30;
+
+export interface CaptureSpec {
+  /** 总帧数 = 秒数 × CAPTURE_FPS */
+  totalFrames: number;
+  /** 循环里转几圈（整数，默认 1）；结束方位角 = 起始 + 2π·turns */
+  turns?: number;
+  /** 沸腾重绘频率（Hz，默认 10 = §9 推荐的 8~12） */
+  boilFps?: number;
+}
+
+export interface CapturePlan {
+  totalFrames: number;
+  turns: number;
+  framesPerPhase: number;
+  phases: number;
+  /** 实际沸腾重绘频率 */
+  boilHz: number;
+  /** 循环时长（秒） */
+  seconds: number;
+}
+
+interface CaptureState extends CapturePlan {
+  azimuth0: number;
+  elevation: number;
+  distance: number;
+  target: THREE.Vector3;
+  savedPosition: THREE.Vector3;
+  savedTarget: THREE.Vector3;
 }
 
 type NumericUniform = THREE.IUniform<number>;
@@ -204,6 +248,13 @@ export class Viewer {
   private boilPhase = 0;
   private disposed = false;
 
+  /** 画布（录制 / 出帧要用） */
+  readonly canvas: HTMLCanvasElement;
+  /** 录制/出帧的确定性时钟状态（非空 = 正在捕获） */
+  private capture: CaptureState | null = null;
+  /** 输出尺寸覆盖（null = 跟窗口走） */
+  private outputSize: { width: number; height: number } | null = null;
+
   // ── 随点云变化的取景 / 深度参数（真实点云尺度不同，不能写死）──
   /** 点大小换算用的参考视距（uPointSize 是"这个距离下的像素直径"） */
   private refDepth = REF_DEPTH_DEFAULT;
@@ -216,6 +267,7 @@ export class Viewer {
   constructor(canvas: HTMLCanvasElement, blueNoise: THREE.Texture) {
     this.params = cloneParams(PRESETS[DEFAULT_PRESET].params);
     this.paperColor.set(this.params.paper);
+    this.canvas = canvas;
 
     this.renderer = new THREE.WebGLRenderer({
       canvas,
@@ -511,9 +563,11 @@ export class Viewer {
   // ── 尺寸 ────────────────────────────────────────────────────────────────
   private readonly resize = (): void => {
     if (this.disposed) return;
-    const width = window.innerWidth;
-    const height = window.innerHeight;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    // 录制时用输出尺寸覆盖窗口尺寸，pixelRatio 固定 1 → 绘图缓冲就是目标像素数
+    const override = this.outputSize;
+    const width = override?.width ?? window.innerWidth;
+    const height = override?.height ?? window.innerHeight;
+    const dpr = override ? 1 : Math.min(window.devicePixelRatio || 1, 2);
 
     this.renderer.setPixelRatio(dpr);
     this.renderer.setSize(width, height, false);
@@ -594,6 +648,13 @@ export class Viewer {
     const dt = this.lastTickAt === 0 ? 1 / 60 : Math.min((now - this.lastTickAt) / 1000, 0.1);
     this.lastTickAt = now;
 
+    // 捕获时：主循环只负责统计（保持 144Hz 的 rAF 心跳），
+    // 画面由 capture.ts 的录制循环按 30fps 时间片渲染确定性帧。
+    if (this.capture) {
+      this.updateFps();
+      return;
+    }
+
     // L3 沸腾：相位由「按 60fps 折算的逻辑帧计 % 循环长度」决定。
     // 这样做同时满足两件事：① 换 144Hz 屏幕也是 10 Hz 重绘；② 时间可回绕（§9「GIF 循环跳帧」）。
     this.boilClock = (this.boilClock + dt * 60) % BOIL_CYCLE_FRAMES;
@@ -617,8 +678,18 @@ export class Viewer {
 
     const framesPerPhase = Math.max(1, Math.round(60 / BOIL_FPS));
     const phases = Math.max(1, Math.round(BOIL_CYCLE_FRAMES / framesPerPhase));
-    const phase = Math.floor(this.boilClock / framesPerPhase) % phases;
+    this.applyBoilPhase(Math.floor(this.boilClock / framesPerPhase) % phases);
+  }
+
+  /** 把某个沸腾相位刷到 uniform 上（实时循环与录制共用同一套公式） */
+  private applyBoilPhase(phase: number): void {
     this.boilPhase = phase;
+    if (!this.params.boil) {
+      this.pointUniforms.uBoilSeed.value = 0;
+      this.compositeUniforms.uBoilJitter.value.set(0, 0);
+      this.compositeUniforms.uBoilFlicker.value = 0;
+      return;
+    }
 
     // 同一 phase 的抖动是确定的；不同 phase 之间用整数哈希取随机 → 不需存历史
     const r1 = hash01(phase * 3 + 1);
@@ -633,6 +704,134 @@ export class Viewer {
       (r3 - 0.5) * 2 * BOIL_LINE_JITTER,
     );
     this.compositeUniforms.uBoilFlicker.value = r1;
+  }
+
+  // ── 录制 / 出帧 ────────────────────────────────────────────────────────
+  get isCapturing(): boolean {
+    return this.capture !== null;
+  }
+
+  /** 当前输出帧尺寸（录制时是 setOutputSize 的目标，否则是窗口尺寸） */
+  captureSize(): { width: number; height: number } {
+    const size = this.outputSize;
+    return size
+      ? { width: size.width, height: size.height }
+      : { width: window.innerWidth, height: window.innerHeight };
+  }
+
+  /**
+   * 开始捕获：冻结交互、切到「帧索引驱动」的确定性时钟。
+   * 返回对齐后的计划（实际沸腾频率可能因整除被微调）。
+   */
+  beginCapture(spec: CaptureSpec): CapturePlan {
+    if (this.capture) throw new Error('已经处在捕获状态');
+
+    const total = Math.max(1, Math.round(spec.totalFrames));
+    const turns = Math.max(1, Math.round(spec.turns ?? 1));
+    const boilFps = Math.max(1, spec.boilFps ?? 10);
+
+    // 沸腾每相几帧：从 30/boilFps 往小取，直到能整除总帧数（保证相位在 N 处回绕到 0）
+    let framesPerPhase = Math.max(1, Math.round(CAPTURE_FPS / boilFps));
+    while (framesPerPhase > 1 && total % framesPerPhase !== 0) framesPerPhase -= 1;
+    if (total % framesPerPhase !== 0) framesPerPhase = 1; // 兜底：一帧一相
+    const phases = total / framesPerPhase;
+
+    const target = this.controls.target.clone();
+    const offset = this.camera.position.clone().sub(target);
+    const distance = Math.max(offset.length(), 1e-6);
+
+    this.capture = {
+      totalFrames: total,
+      turns,
+      framesPerPhase,
+      phases,
+      boilHz: CAPTURE_FPS / framesPerPhase,
+      seconds: total / CAPTURE_FPS,
+      azimuth0: Math.atan2(offset.x, offset.z),
+      elevation: Math.asin(THREE.MathUtils.clamp(offset.y / distance, -1, 1)),
+      distance,
+      target,
+      savedPosition: this.camera.position.clone(),
+      savedTarget: target.clone(),
+    };
+
+    this.controls.enabled = false;
+    this.controls.autoRotate = false;
+    return {
+      totalFrames: total,
+      turns,
+      framesPerPhase,
+      phases,
+      boilHz: this.capture.boilHz,
+      seconds: this.capture.seconds,
+    };
+  }
+
+  /**
+   * 渲染捕获序列里的第 index 帧。
+   * index == totalFrames 时得到的就是「回绕帧」——与 index 0 逐位相同（自检用）。
+   */
+  renderCaptureFrame(index: number): void {
+    const capture = this.capture;
+    if (!capture) throw new Error('未开始捕获');
+
+    const wrapped = ((index % capture.totalFrames) + capture.totalFrames) % capture.totalFrames;
+    const angle = Math.PI * 2 * capture.turns * (wrapped / capture.totalFrames);
+    const azimuth = capture.azimuth0 + angle;
+    const cosElevation = Math.cos(capture.elevation);
+
+    this.camera.position.set(
+      capture.target.x + capture.distance * cosElevation * Math.sin(azimuth),
+      capture.target.y + capture.distance * Math.sin(capture.elevation),
+      capture.target.z + capture.distance * cosElevation * Math.cos(azimuth),
+    );
+    this.camera.lookAt(capture.target);
+    this.camera.updateMatrixWorld();
+
+    const phase = Math.floor(wrapped / capture.framesPerPhase) % capture.phases;
+    this.applyBoilPhase(phase);
+
+    this.renderFrame();
+  }
+
+  /** 结束捕获：恢复相机与交互 */
+  endCapture(): void {
+    const capture = this.capture;
+    if (!capture) return;
+    this.capture = null;
+    this.camera.position.copy(capture.savedPosition);
+    this.controls.target.copy(capture.savedTarget);
+    this.controls.enabled = true;
+    this.lastTickAt = 0;
+    this.applyParams();
+    this.controls.update();
+    this.renderFrame();
+  }
+
+  /**
+   * 设置输出尺寸（null = 跟窗口走）。
+   * 录制 1080p / 1080×1080 时用：pixelRatio 强制 1，绘图缓冲就是目标像素数。
+   */
+  setOutputSize(size: { width: number; height: number } | null): void {
+    this.outputSize = size;
+    if (size) {
+      document.body.classList.add('capturing');
+      const scale = Math.min(window.innerWidth / size.width, window.innerHeight / size.height);
+      this.canvas.style.width = `${Math.max(1, Math.round(size.width * scale))}px`;
+      this.canvas.style.height = `${Math.max(1, Math.round(size.height * scale))}px`;
+    } else {
+      document.body.classList.remove('capturing');
+      this.canvas.style.width = '';
+      this.canvas.style.height = '';
+    }
+    this.resize();
+  }
+
+  /** 捕获计划信息（未在捕获时返回 null） */
+  get capturePlan(): CapturePlan | null {
+    if (!this.capture) return null;
+    const { totalFrames, turns, framesPerPhase, phases, boilHz, seconds } = this.capture;
+    return { totalFrames, turns, framesPerPhase, phases, boilHz, seconds };
   }
 
   private renderFrame(): void {
@@ -702,6 +901,7 @@ export class Viewer {
       cameraDistance: this.frameInfo?.distance ?? 0,
       coreRadius: this.frameInfo?.radius ?? 0,
       pointSize: this.params.pointSize,
+      capturing: this.capture !== null,
     };
   }
 
@@ -742,6 +942,21 @@ export interface Illust3dDebug {
   syncPanel?: () => void;
   /** 换一份 ILC1 点云（真实深度点云 / 自动化测试用），返回点数 */
   loadILC1?: (buffer: ArrayBuffer, label?: string) => number;
+  /** A 阶段约定：逐帧导出 PNG blob（GIF 由 Go 侧 image/gif 编码） */
+  captureFrames?: (
+    count: number,
+    options?: { turns?: number; size?: { width: number; height: number }; includeWrapFrame?: boolean },
+  ) => Promise<Blob[]>;
+  /** 录一个完整循环的 WebM */
+  recordWebM?: (
+    seconds: number,
+    sizeKey?: 'viewport' | '1080p' | 'square',
+  ) => Promise<{ blob: Blob; plan: CapturePlan; mimeType: string }>;
+  /** 无缝自检：index 0 与 index N 是否逐像素相同 */
+  verifySeam?: (
+    seconds: number,
+    sizeKey?: 'viewport' | '1080p' | 'square',
+  ) => Promise<{ identical: boolean; hashFirst: string; hashWrap: string; plan: CapturePlan }>;
 }
 
 declare global {

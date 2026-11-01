@@ -8,6 +8,25 @@
 import type { NumericParamKey, PresetKey, RenderParams } from './params';
 import { PRESETS, PRESET_KEYS } from './params';
 import type { ViewerStats } from './viewer';
+import type { OutputSizeKey } from './capture';
+
+/** 导出的三种动作 */
+export type ExportAction = 'record' | 'frames' | 'seam';
+
+export interface ExportRequest {
+  action: ExportAction;
+  seconds: number;
+  sizeKey: OutputSizeKey;
+}
+
+/** 时长选项（秒）：30fps × 秒数都能被 3 整除，沸腾相位才能在循环点回绕 */
+const DURATIONS = [4, 6, 10] as const;
+const DEFAULT_DURATION = 6;
+const SIZE_OPTIONS: ReadonlyArray<{ key: OutputSizeKey; label: string }> = [
+  { key: 'square', label: '1080×1080 方图' },
+  { key: '1080p', label: '1920×1080' },
+  { key: 'viewport', label: '当前视口' },
+];
 
 interface SliderDef {
   key: NumericParamKey;
@@ -40,23 +59,34 @@ export interface PanelOptions {
   activePreset: PresetKey;
   onChange: () => void;
   onPreset: (key: PresetKey) => void;
+  onExport: (request: ExportRequest) => void;
 }
 
 export class Panel {
   private readonly params: RenderParams;
   private readonly onChange: () => void;
+  private readonly onExport: (request: ExportRequest) => void;
   private readonly syncers: Array<() => void> = [];
   private readonly hud: HTMLElement;
   private readonly container: HTMLElement;
   private readonly presetButtons = new Map<PresetKey, HTMLButtonElement>();
   private sourceLabel = '';
   private lastStats: ViewerStats | null = null;
+  /** 当前预设（导出文件名要用） */
+  private preset: PresetKey;
+  /** 导出区控件 */
+  private durationSelect: HTMLSelectElement | null = null;
+  private sizeSelect: HTMLSelectElement | null = null;
+  private exportButtons: HTMLButtonElement[] = [];
+  private statusElement: HTMLElement | null = null;
 
   constructor(options: PanelOptions) {
     this.params = options.params;
     this.onChange = options.onChange;
+    this.onExport = options.onExport;
     this.hud = options.hud;
     this.container = options.container;
+    this.preset = options.activePreset;
 
     const panel = this.container;
     panel.textContent = '';
@@ -99,6 +129,11 @@ export class Panel {
 
     // ── 背景色 ──
     panel.append(this.buildColor('paper', '背景 / 纸色'));
+
+    panel.append(document.createElement('hr'));
+
+    // ── 导出（A 阶段：WebM 循环录制 + 帧序列 + 无缝自检）──
+    panel.append(this.buildExportSection());
 
     panel.append(document.createElement('hr'));
 
@@ -196,7 +231,114 @@ export class Panel {
     return row;
   }
 
+  // ── 导出区 ──────────────────────────────────────────────────────────────
+  private buildExportSection(): HTMLElement {
+    const section = document.createElement('div');
+    section.className = 'export';
+
+    const heading = document.createElement('div');
+    heading.className = 'export-title';
+    heading.textContent = '循环动图导出';
+    section.append(heading);
+
+    // 时长
+    const durationRow = document.createElement('div');
+    durationRow.className = 'row select';
+    const durationLabel = document.createElement('span');
+    durationLabel.textContent = '时长';
+    const durationSelect = document.createElement('select');
+    for (const seconds of DURATIONS) {
+      const option = document.createElement('option');
+      option.value = String(seconds);
+      option.textContent = `${seconds}s（${seconds * 30} 帧 @30fps）`;
+      if (seconds === DEFAULT_DURATION) option.selected = true;
+      durationSelect.append(option);
+    }
+    durationRow.append(durationLabel, durationSelect);
+    section.append(durationRow);
+
+    // 尺寸
+    const sizeRow = document.createElement('div');
+    sizeRow.className = 'row select';
+    const sizeLabel = document.createElement('span');
+    sizeLabel.textContent = '尺寸';
+    const sizeSelect = document.createElement('select');
+    for (const option of SIZE_OPTIONS) {
+      const element = document.createElement('option');
+      element.value = option.key;
+      element.textContent = option.label;
+      sizeSelect.append(element);
+    }
+    sizeRow.append(sizeLabel, sizeSelect);
+    section.append(sizeRow);
+
+    this.durationSelect = durationSelect;
+    this.sizeSelect = sizeSelect;
+
+    // 按钮
+    const buttons = document.createElement('div');
+    buttons.className = 'export-buttons';
+    const specs: Array<{ action: ExportAction; label: string; hint: string }> = [
+      { action: 'record', label: '录制 WebM', hint: '录一个完整循环（可循环播放）' },
+      { action: 'frames', label: '导出帧序列', hint: '逐帧 PNG，给 Go 侧 image/gif 编码' },
+      { action: 'seam', label: '无缝自检', hint: '比较 index 0 与 index N 是否逐像素相同' },
+    ];
+    for (const spec of specs) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = spec.label;
+      button.title = spec.hint;
+      button.addEventListener('click', () => {
+        this.onExport({
+          action: spec.action,
+          seconds: Number(durationSelect.value),
+          sizeKey: sizeSelect.value as OutputSizeKey,
+        });
+      });
+      this.exportButtons.push(button);
+      buttons.append(button);
+    }
+    section.append(buttons);
+
+    const status = document.createElement('div');
+    status.className = 'export-status';
+    status.textContent = '';
+    this.statusElement = status;
+    section.append(status);
+
+    return section;
+  }
+
+  /** 当前预设（导出文件名用） */
+  get currentPreset(): PresetKey {
+    return this.preset;
+  }
+
+  /** 导出参数（尺寸/时长），给自动化脚本读 */
+  get exportSelection(): { seconds: number; sizeKey: OutputSizeKey } {
+    return {
+      seconds: Number(this.durationSelect?.value ?? DEFAULT_DURATION),
+      sizeKey: (this.sizeSelect?.value ?? 'square') as OutputSizeKey,
+    };
+  }
+
+  /** 导出中：禁用所有控件，防止录到一半参数被改 */
+  setExportBusy(busy: boolean): void {
+    this.container.classList.toggle('busy', busy);
+    const controls = this.container.querySelectorAll<
+      HTMLInputElement | HTMLSelectElement | HTMLButtonElement
+    >('input, select, button');
+    for (const element of controls) {
+      element.disabled = busy;
+    }
+  }
+
+  setExportStatus(text: string): void {
+    if (this.statusElement) this.statusElement.textContent = text;
+  }
+
   private setActivePreset(key: PresetKey): void {
+    this.preset = key;
     for (const [presetKey, button] of this.presetButtons) {
       button.classList.toggle('active', presetKey === key);
     }
