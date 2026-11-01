@@ -51,19 +51,21 @@ conda create -n illust3d python=3.10 -y
 ```
 PIP_CACHE_DIR    = E:\cache\pip          # pip 缓存离开 C 盘
 PYTHONNOUSERSITE = 1                     # ★隔离：不读 C:\Users\zj\AppData\Roaming\Python 下的包
+TMP / TEMP / TMPDIR = E:\cache\tmp       # ★临时目录也必须离开 C 盘（见下方踩坑）
 HF_HOME          = E:\models\hf          # HuggingFace 模型与缓存
 HF_ENDPOINT      = https://hf-mirror.com # 国内镜像
 TORCH_HOME       = E:\models\torch       # torch hub 缓存
 ```
 
-**两条是"不污染全局"的核心保障：**
+**三条是"不污染全局 / 不占 C 盘"的核心保障：**
 
 | 变量 | 作用 |
 |---|---|
-| `PYTHONNOUSERSITE=1` | 不会意外 import 到 `%APPDATA%\Python` 里的用户级包（那是另一个隐性污染源） |
+| `PYTHONNOUSERSITE=1` | 不会意外 import 到 `%APPDATA%\Python` 里的用户级包（另一个隐性污染源） |
 | `PIP_CACHE_DIR` | pip 缓存不进 C 盘 |
+| `TMP` / `TEMP` / `TMPDIR` | **pip 的临时解包目录、HF 下载暂存都走这里** |
 
-> ### 踩过的坑：`PIP_REQUIRE_VIRTUALENV` 和 conda 不兼容（2026-11 实测）
+> ### 踩坑一：`PIP_REQUIRE_VIRTUALENV` 和 conda 不兼容（2026-11 实测）
 >
 > 原本还打算设 `PIP_REQUIRE_VIRTUALENV=1` 当"硬闸"——手滑在 base 里 `pip install` 会直接拒绝。
 > **但它会让 env 自己的 pip 也拒绝工作**，报 `Could not find an activated virtualenv (required)`。
@@ -74,6 +76,16 @@ TORCH_HOME       = E:\models\torch       # torch hub 缓存
 > 2. `scripts/setup-env.ps1` 开头断言 `sys.prefix` 必须落在 `E:\conda\envs_dirs` 下，否则直接中止
 >
 > 教训：**"硬闸"要选在真正能生效的层**。隔离靠的是"永远不碰 base 的解释器"，不是靠一个开关变量。
+>
+> ### 踩坑二：只重定向 `PIP_CACHE_DIR` 不够，`TEMP` 才是大头（2026-11 实测）
+>
+> 第一次装 torch 时只设了 `PIP_CACHE_DIR`，结果 pip 把 2.4 GB 的轮子先解到
+> `C:\Users\zj\AppData\Local\Temp\pip-unpack-*\`，**C 盘从 3.8 GB 被吃到 1.11 GB**，任务被迫中止。
+>
+> `PIP_CACHE_DIR` 管的是"装完之后留存的缓存"；**下载过程中的临时文件走 `%TEMP%`，是另一条路径**。
+> 现在 `TMP`/`TEMP`/`TMPDIR` 一并指向 `E:\cache\tmp`，并在脚本开头加了 C 盘空间护栏。
+>
+> 教训：**"所有缓存落 E 盘"要数清有几条路径**——cache / temp / home / hub，漏一条就前功尽弃。
 
 ### 1.3 装依赖：最小起步，缺什么补什么
 
