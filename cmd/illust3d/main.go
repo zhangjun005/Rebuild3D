@@ -56,6 +56,7 @@ func run() int {
 	sidecarScript := flag.String("sidecar-script", infer.DefaultScript, "sidecar 入口脚本路径")
 	sidecarRes := flag.Int("sidecar-res", infer.DefaultRes, "sidecar 的 process_res（像素）")
 	shutdownAfter := flag.Duration("shutdown-after", 0, "调试/验收用：启动 N 秒后优雅退出（0 = 不自动退出）")
+	panicAfter := flag.Duration("panic-after", 0, "调试/验收用：启动 N 秒后主动 panic（验证 defer 链能清理 sidecar；0 = 不 panic）")
 	showVersion := flag.Bool("version", false, "打印版本号后退出")
 	flag.Parse()
 
@@ -137,6 +138,13 @@ func run() int {
 		errCh <- nil
 	}()
 
+	// -panic-after：在主 goroutine 主动 panic，验证 defer 链（sidecar 清理）在崩溃路径也生效。
+	var panicCh <-chan time.Time
+	if *panicAfter > 0 {
+		log.Printf("调试模式：%s 后主动 panic（验证崩溃路径不留孤儿进程）", *panicAfter)
+		panicCh = time.After(*panicAfter)
+	}
+
 	select {
 	case <-ctx.Done():
 		log.Printf("收到退出信号，正在关闭……")
@@ -146,6 +154,8 @@ func run() int {
 			return 1
 		}
 		return 0
+	case <-panicCh:
+		panic("测试用：-panic-after 主动 panic（验证 defer 链会清理 sidecar）")
 	}
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownGrace)
