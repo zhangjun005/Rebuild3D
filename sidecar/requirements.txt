@@ -1,4 +1,4 @@
-# Python sidecar 依赖（最小集）
+# Python sidecar 依赖
 #
 # torch / torchvision 不写在这里：它们要用 CUDA 专用 index 单独安装，
 # 见 scripts/setup-env.ps1。把这个文件装进环境：
@@ -8,10 +8,28 @@
 #
 # 首次安装成功后用 `pip freeze > sidecar/requirements.lock.txt` 生成锁定版本。
 
+# ── 必须锁 < 2：DA3 明确要求 numpy<2；scipy/sklearn 会把它顶到 2.x，装完要压回去 ──
 numpy<2
+
+# ── DA3 推理路径实测需要 ──
 opencv-python
 pillow
+pillow_heif
+imageio
 huggingface_hub
 safetensors
 einops
 omegaconf
+addict
+requests
+
+# ── 位姿对齐相关：只用于多视图（单图不装 evo，已打懒加载补丁）──
+scipy
+scikit-learn
+
+# ── 明确不装（见 docs/selection.md §1.4）──
+# xformers      DA3 有 ImportError 回退
+# evo           只服务多视图位姿对齐；已打懒加载补丁（sidecar/vendor/PATCHES.md #2）
+# plyfile       要求 numpy>=2，与 DA3 冲突；且只有导出才用
+# trimesh / open3d / pycolmap / moviepy / gsplat   DA3 的导出链，已懒加载补丁绕开
+# fastapi / uvicorn / gradio / typer / matplotlib  DA3 的 app/CLI/可视化，推理不用
