@@ -285,6 +285,26 @@
         text-transform: uppercase;
         margin-bottom: 4px;
       }
+      .segmented {
+        display: flex;
+        gap: 6px;
+        margin: 4px 0 6px;
+      }
+      .segmented button {
+        flex: 1 1 0;
+        padding: 5px 4px;
+        font-size: 10.5px;
+        border-radius: 6px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--ui-dim);
+        cursor: pointer;
+      }
+      .segmented button.active {
+        border-color: var(--ui-accent);
+        color: var(--ui-accent);
+        background: rgba(216, 162, 74, 0.14);
+      }
       .drop-overlay {
         position: fixed;
         inset: 0;

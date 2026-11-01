@@ -120,9 +120,28 @@ async function boot(): Promise<void> {
     activePreset: DEFAULT_PRESET,
     onChange: () => {
       viewer.setParams(viewer.params);
-      // 切到点云模式但还没有这份图的点云 → 懒加载（图像模式不需要 Go）
-      if (viewer.params.renderMode === 'cloud' && lastFile && cloudForFile !== lastFile) {
-        void generateCloud();
+      // 模式切换：状态栏跟着变（不能出现"图像模式却写着 400,000 点"这种矛盾）
+      const mode = viewer.params.renderMode;
+      if (mode !== lastMode) {
+        lastMode = mode;
+        if (mode === 'image') {
+          if (lastFile && !viewer.hasImage) void useImageMode(lastFile);
+          else {
+            panel.setInputStatus(
+              [
+                `图像模式（对照）：${lastFile?.name ?? ''}`,
+                '原图直接风格化：线稿/颜色保留，但没有立体感。',
+                '点云模式才是产品路径 —— 点上面「点云」切回。',
+              ].join('\n'),
+            );
+          }
+        } else {
+          panel.setInputStatus(
+            lastCloudMetrics ? cloudReadyStatus() : '点云模式：上传一张插画即可生成点云',
+          );
+          // 切回点云但这份图还没生成过 → 懒加载
+          if (lastFile && cloudForFile !== lastFile) void generateCloud();
+        }
       }
     },
     onPreset: (key) => viewer.applyPreset(key),
@@ -132,7 +151,8 @@ async function boot(): Promise<void> {
     onUpload: (file) => {
       lastFile = file;
       cloudForFile = null;
-      void showImage(file);
+      // 产品路径：上传直接走点云（图像模式只是可选/回退，不再是默认）
+      void generateCloud();
     },
     onLoadSample: () => {
       void reloadSample();
@@ -230,46 +250,65 @@ async function boot(): Promise<void> {
     return { texture, aspect: bitmap.width / Math.max(bitmap.height, 1), meanLuminance };
   };
 
-  /** 上传即出图：图像模式，完全不依赖深度质量 */
-  async function showImage(file: File): Promise<void> {
-    panel.setInputBusy(true);
+  /**
+   * 把图片装进 viewer（不改变渲染模式）。
+   * 图像模式是**可选/回退**路径：上传默认走点云，只有用户显式切模式或推理失败时才用到它。
+   */
+  async function ensureImage(file: File): Promise<void> {
+    const { texture, aspect, meanLuminance } = await loadImageTexture(file);
+    viewer.setImage(texture, aspect, meanLuminance);
+  }
+
+  /** 图像模式（对照/回退）：用户显式切换、或点云失败时用 */
+  async function useImageMode(file: File): Promise<void> {
     try {
       panel.setInputStatus(`读取 ${file.name}（${(file.size / 1048576).toFixed(1)} MB）…`);
-      const { texture, aspect, meanLuminance } = await loadImageTexture(file);
+      await ensureImage(file);
       viewer.params.renderMode = 'image';
-      // 图像模式默认「按局部结构」：平坦区留纸、线稿/五官/褶皱上墨（修主次颠倒）
       viewer.params.inkSource = 1;
-      // 真实插画默认铜版画：排线能把平板压出层次，duotone 又贡献明暗分离，
-      // 是「信息不足」数据上最抗跌的一档（点画/半调依赖点密度表达一切，最先崩）。
-      viewer.applyPreset('engraving');
+      // 图像模式降级为对照/回退：默认用「彩色点画」（保留原画颜色），别一上来就是重铜版画
+      viewer.applyPreset('color-print');
       viewer.params.renderMode = 'image';
       viewer.setParams(viewer.params);
-      viewer.setImage(texture, aspect, meanLuminance);
-      panel.setPreset('engraving');
+      panel.setPreset('color-print');
+      panel.setImageSource(file.name);
       panel.setInputStatus(
         [
-          `图像模式就绪：${file.name}`,
-          `平均亮度 ${meanLuminance.toFixed(2)}（主体极性自动 → ${meanLuminance > 0.62 ? '亮主体' : '暗主体'}）`,
-          '线稿/五官/装饰完整保留；想加立体感再切「点云模式」（会请求 Go 推理）',
+          `图像模式（对照/回退）：${file.name}`,
+          '图像模式直接用原图做风格化，不经过深度：线稿保留，但没有立体感。',
+          '点云模式才是产品路径 —— 切回「点云」即可重新生成。',
         ].join('\n'),
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.error('[illust3d] 图像载入失败', error);
-      panel.setInputStatus(`图像载入失败：${message}`);
-    } finally {
-      panel.setInputBusy(false);
+      console.error('[illust3d] 图像模式载入失败', error);
+      panel.setInputStatus(`图像模式载入失败：${message}`);
     }
   }
 
-  // ── 点云模式：POST /api/infer → ILC1 → 渲染（按需，懒加载）──────────────────
+  // ── 点云模式（产品路径）：POST /api/infer → ILC1 → 渲染 ─────────────────────
+  /** 点云模式的采样上限：最终配方 400,000（点云是产品路径，别再给 20 万） */
+  const CLOUD_MAX_POINTS = 400000;
+  /** 最近一次点云生成结果（模式来回切换时用来重建状态栏） */
+  let lastCloudMetrics: { pointCount: number; depthWidth: number; depthHeight: number; inferMs: number; geometryMs: number; totalMs: number; bytes: number } | null = null;
+  let lastMode: 'cloud' | 'image' = viewer.params.renderMode;
+
+  /** 点云就绪状态栏（点数是用户判断"生成了没有"的唯一依据） */
+  function cloudReadyStatus(): string {
+    const m = lastCloudMetrics;
+    if (!m) return '✓ 点云就绪';
+    return [
+      `✓ 点云就绪：${m.pointCount.toLocaleString('en-US')} 点 · 深度 ${m.depthWidth}×${m.depthHeight}`,
+      `推理 ${m.inferMs.toFixed(0)}ms · 几何 ${m.geometryMs.toFixed(0)}ms · 合计 ${m.totalMs.toFixed(0)}ms · ILC1 ${(m.bytes / 1048576).toFixed(2)} MB`,
+      '左键拖拽旋转 · 滚轮缩放 · 「回正」回到正面',
+    ].join('\n');
+  }
+
+
   async function generateCloud(): Promise<void> {
     const file = lastFile;
     if (!file) {
       panel.setInputStatus('先上传一张插画，再切点云模式');
-      viewer.params.renderMode = 'image';
-      viewer.setParams(viewer.params);
-      panel.sync();
       return;
     }
     if (busy) return;
@@ -299,13 +338,18 @@ async function boot(): Promise<void> {
         panel.setInputStatus(`模型就绪（加载 ${(status.load_seconds ?? 0).toFixed(1)}s，显存 ${Math.round(status.vram_used_mb ?? 0)} MiB）`);
       }
 
-      panel.setInputStatus('推理中…（深度 → 点云）');
+      panel.setInputStatus(
+        `推理中…（深度 → 点云，最多 ${CLOUD_MAX_POINTS.toLocaleString('en-US')} 点，首次可能要 1~3s）`,
+      );
       const result = await inferIllustration(file, {
+        maxPoints: CLOUD_MAX_POINTS,
         onPhase: (phase) => panel.setInputStatus(phase),
       });
+      panel.setInputStatus(`生成点云…（${result.metrics.pointCount.toLocaleString('en-US')} 点）`);
       applyCloud(result.cloud, `${file.name} · ${result.metrics.pointCount.toLocaleString('en-US')} 点`);
       cloudForFile = file;
-      // 点云模式：唯一可靠的信号是**深度** → 墨量按深度 + 极性「暗主体」（不做翻转）。
+      // 产品路径就是点云（用户可能从图像模式切过来）
+      viewer.params.renderMode = 'cloud';
       // 近层（主体）上墨、远景（背景）留纸，figure-ground 才分得开；按亮度会让白主体消失。
       if (viewer.params.inkSource !== 2) {
         viewer.params.inkSource = 2;
@@ -314,22 +358,22 @@ async function boot(): Promise<void> {
         panel.sync();
       }
       const m = result.metrics;
-      panel.setInputStatus(
-        [
-          `点云模式：${m.pointCount.toLocaleString('en-US')} 点 · 深度 ${m.depthWidth}×${m.depthHeight}`,
-          `推理 ${m.inferMs.toFixed(0)}ms · 几何 ${m.geometryMs.toFixed(0)}ms · 合计 ${m.totalMs.toFixed(0)}ms`,
-          `ILC1 ${(result.buffer.byteLength / 1048576).toFixed(2)} MB · 线稿在深度里不存在，只有剪影`,
-        ].join('\n'),
-      );
+      lastCloudMetrics = { ...m, bytes: result.buffer.byteLength };
+      panel.setInputStatus(cloudReadyStatus());
+      // 顺带把原图装好：用户想切「图像模式（对照）」时不用再等
+      void ensureImage(file)
+        .then(() => panel.setImageSource(file.name))
+        .catch((error: unknown) => {
+          console.warn('[illust3d] 图像对照准备失败（不影响点云）', error);
+        });
       console.info('[illust3d] 推理完成', m);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.error('[illust3d] 插画推理失败', error);
-      panel.setInputStatus(`点云模式失败：${message}`);
-      // 失败就退回图像模式，别让用户看到一张坏图
-      viewer.params.renderMode = 'image';
-      viewer.setParams(viewer.params);
-      panel.sync();
+      console.error('[illust3d] 点云生成失败', error);
+      panel.setInputStatus(
+        `点云生成失败：${message}\n已自动切到「图像模式」——可直接看画面，修好后切回「点云」重试`,
+      );
+      if (file) await useImageMode(file);
     } finally {
       busy = false;
       panel.setInputBusy(false);
@@ -378,7 +422,7 @@ async function boot(): Promise<void> {
     if (file) {
       lastFile = file;
       cloudForFile = null;
-      void showImage(file);
+      void generateCloud();
     }
   });
 

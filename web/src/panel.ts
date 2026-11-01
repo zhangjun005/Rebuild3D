@@ -122,6 +122,8 @@ export class Panel {
   private readonly container: HTMLElement;
   private readonly presetButtons = new Map<PresetKey, HTMLButtonElement>();
   private sourceLabel = '';
+  /** 图像模式（对照）的来源标签：上传的文件名，不含点数 */
+  private imageSourceLabel = '';
   private lastStats: ViewerStats | null = null;
   /** 当前预设（导出文件名要用） */
   private preset: PresetKey;
@@ -157,6 +159,35 @@ export class Panel {
 
     // ── 输入（真实插画 → /api/infer）──
     scrollArea.append(this.buildInputSection(options));
+
+    // ── 渲染模式（segmented，常显）──
+    // 产品路径 = 点云（上传即生成）；图像模式是可选的对照/回退。
+    // 不藏进 debug 折叠区：用户必须随时知道自己在哪个模式。
+    const modeRow = document.createElement('div');
+    modeRow.className = 'segmented';
+    const modeButtons: Array<{ value: RenderParams['renderMode']; button: HTMLButtonElement }> = [];
+    for (const option of [
+      { value: 'cloud' as const, label: '点云（产品）' },
+      { value: 'image' as const, label: '图像（对照）' },
+    ]) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = option.label;
+      button.addEventListener('click', () => {
+        this.params.renderMode = option.value;
+        this.sync();
+        this.onChange();
+      });
+      modeButtons.push({ value: option.value, button });
+      modeRow.append(button);
+    }
+    this.syncers.push(() => {
+      for (const entry of modeButtons) {
+        entry.button.classList.toggle('active', this.params.renderMode === entry.value);
+      }
+      this.renderHud();
+    });
+    scrollArea.append(modeRow);
 
     // ── 预设 ──
     const presets = document.createElement('div');
@@ -211,24 +242,12 @@ export class Panel {
     colorGrid.append(this.buildColor('paper', '背景 / 纸色'), this.buildColor('ink', '墨色'));
     scrollArea.append(colorGrid);
 
-    // ── 调试 / 对照（非产品路径）────────────────────────────────────────────
-    // 产品路径固定是「点云模式」。图像模式是拿原图直接做风格化的对照组，
-    // 用来判断"点云渲染差在哪"，不参与产品流程（用户明确：所有渲染都是针对生成的点云）。
+    // ── 调试（非产品路径）────────────────────────────────────────────────────
     const debugGroup = document.createElement('details');
     debugGroup.className = 'debug';
     const debugSummary = document.createElement('summary');
-    debugSummary.textContent = '调试 / 对照（非产品路径）';
+    debugSummary.textContent = '调试（非产品路径）';
     debugGroup.append(debugSummary);
-    debugGroup.append(
-      this.buildSelect({
-        key: 'renderMode',
-        label: '渲染模式',
-        options: [
-          { value: 'cloud', label: '点云模式（产品路径）' },
-          { value: 'image', label: '图像模式（对照：直接用原图）' },
-        ],
-      }),
-    );
     const threeQuarterRow = this.buildToggle('threeQuarterView', '3/4 基准视角（仅调试 fixture）');
     this.syncers.push(() => {
       threeQuarterRow.hidden = this.params.renderMode !== 'cloud';
@@ -547,6 +566,12 @@ export class Panel {
     for (const sync of this.syncers) sync();
   }
 
+  /** 图像模式（对照）的来源：上传的文件名（不含点数，避免 HUD 自相矛盾） */
+  setImageSource(label: string): void {
+    this.imageSourceLabel = label;
+    this.renderHud();
+  }
+
   setSource(label: string): void {
     this.sourceLabel = label;
     this.renderHud();
@@ -559,19 +584,30 @@ export class Panel {
 
   private renderHud(): void {
     const s = this.lastStats;
+    const imageMode = this.params.renderMode === 'image';
     const parts: string[] = [];
     if (s) {
       parts.push(`FPS ${s.fps.toFixed(0)}`);
       parts.push(`帧 ${s.frame}`);
-      parts.push(`${s.points.toLocaleString('en-US')} 点`);
+      // 图像模式没有点云 → 绝不显示"118,401 点"这种与画面矛盾的信息
+      if (imageMode) {
+        parts.push('图像模式（对照）');
+      } else {
+        parts.push(`${s.points.toLocaleString('en-US')} 点`);
+      }
       parts.push(`${s.width}×${s.height}`);
-      if (s.boilPhase > 0) parts.push(`沸腾相 ${s.boilPhase}`);
+      if (!imageMode && s.boilPhase > 0) parts.push(`沸腾相 ${s.boilPhase}`);
     } else {
       parts.push('FPS --');
       parts.push('等待点云…');
     }
     const head = parts.join(' · ');
-    const source = this.sourceLabel ? `\n源 ${this.sourceLabel}` : '';
+    // 「源」必须反映真实来源：图像模式 = 上传的插画（不写点数）；点云模式 = 上传插画 / 样例点云
+    const source = imageMode
+      ? `\n源 ${this.imageSourceLabel || '上传的插画'} · 图像模式（原图，无点云）`
+      : this.sourceLabel
+        ? `\n源 ${this.sourceLabel}`
+        : '';
     this.hud.textContent = head + source;
   }
 }
