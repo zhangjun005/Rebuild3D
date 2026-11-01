@@ -180,26 +180,46 @@ func (s *Server) handleInfer(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// statusClientClosedRequest 是"客户端提前断开"的返回码（499，nginx 约定；
+// Go 标准库没有常量，但前端只要是非 2xx 就能正确分辨失败，不会把空 body 当成功）。
+const statusClientClosedRequest = 499
+
 // writeInferError 把 sidecar 错误映射成合适的 HTTP 状态码。
+//
+// **铁律：任何错误都必须返回非 2xx + JSON body**。历史事故：客户端中断后走
+// context.Canceled 分支直接 return，导致 200 + Content-Length: 0，前端静默失败。
 func (s *Server) writeInferError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, context.Canceled):
-		return // 客户端断开，不必再写响应
+		// 请求被客户端取消（关页面/超时/取消上传）：本次结果作废，但不是服务故障。
+		writeJSON(w, statusClientClosedRequest, map[string]string{
+			"error": "请求已取消（客户端提前断开），本次结果丢弃；服务仍可用，可直接重试",
+			"code":  "client_canceled",
+		}, true)
 	case errors.Is(err, context.DeadlineExceeded):
 		writeJSON(w, http.StatusGatewayTimeout, map[string]string{
 			"error": "sidecar 推理超时: " + err.Error(),
+			"code":  "infer_timeout",
+		}, true)
+	case errors.Is(err, infer.ErrDesync):
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "sidecar 管道失步（帧边界错位）: " + err.Error(),
+			"code":  "desync",
 		}, true)
 	case errors.Is(err, infer.ErrRemote):
 		writeJSON(w, http.StatusBadGateway, map[string]string{
 			"error": "sidecar 推理失败: " + err.Error(),
+			"code":  "sidecar_error",
 		}, true)
 	case errors.Is(err, infer.ErrClosed):
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"error": "sidecar 正在关闭",
+			"code":  "sidecar_closed",
 		}, true)
 	default:
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"error": "sidecar 不可用: " + err.Error(),
+			"code":  "sidecar_unavailable",
 			"hint":  "检查 -sidecar-python 路径与 Go 日志里的 sidecar 报错",
 		}, true)
 	}

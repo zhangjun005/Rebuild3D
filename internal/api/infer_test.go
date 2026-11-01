@@ -414,6 +414,21 @@ func TestInferErrors(t *testing.T) {
 			wantSubstr: "sidecar 推理失败",
 		},
 		{
+			name:  "caller-canceled",
+			image: validPNG,
+			// 历史事故：这个分支曾直接 return → 200 + Content-Length: 0（前端静默失败）。
+			side:       &stubSidecar{err: context.Canceled},
+			wantStatus: statusClientClosedRequest,
+			wantSubstr: "取消",
+		},
+		{
+			name:       "sidecar-desync",
+			image:      validPNG,
+			side:       &stubSidecar{err: fmt.Errorf("%w: 响应长度非法 926505755", infer.ErrDesync)},
+			wantStatus: http.StatusServiceUnavailable,
+			wantSubstr: "失步",
+		},
+		{
 			name:       "sidecar-pipe-error",
 			image:      validPNG,
 			side:       &stubSidecar{err: fmt.Errorf("%w: sidecar 已退出", infer.ErrProtocol)},

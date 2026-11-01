@@ -93,6 +93,24 @@ func main() {
 				// 不写响应，直接退出：Go 侧应看到管道 EOF 并重启进程。
 				os.Exit(1)
 			}
+			if mode == "half-once" && crashFirstTime() {
+				// 只写半帧就退出：模拟"响应只写一半就断开"。
+				// Go 侧会读到 EOF（不完整帧），应判定进程崩溃并重启一次。
+				writeHalfFrameThenExit(out, arg)
+			}
+			if mode == "desync-once" && crashFirstTime() {
+				// 写一个非法的长度前缀并**继续运行**：模拟管道失步。
+				// Go 侧应识别 ErrDesync → 重建管道 → 重试成功（新进程看到 marker 正常应答）。
+				var bogus [4]byte
+				binary.LittleEndian.PutUint32(bogus[:], 926505755) // 线上事故里读到的垃圾长度
+				if _, err := out.Write(bogus[:]); err != nil {
+					fatalf("写失步帧失败: %v", err)
+				}
+				if err := out.Flush(); err != nil {
+					fatalf("flush 失步帧失败: %v", err)
+				}
+				continue
+			}
 			if d := inferDelay(); d > 0 {
 				time.Sleep(d)
 			}
@@ -105,18 +123,39 @@ func main() {
 	}
 }
 
-// crashFirstTime 在第一次崩溃时返回 true，并把 marker 落盘；
-// 重启后的进程看到 marker 返回 false（正常应答），从而能测"重启后重试成功"。
+// crashFirstTime 在第一次触发时返回 true，并把 marker 落盘；
+// 重启后的进程看到 marker 返回 false（正常应答），从而能测"重启/重建后重试成功"。
+// marker 路径优先取 FAKE_CRASH_MARKER，其次 FAKE_DESYNC_MARKER（两种故障测试各用各的）。
 func crashFirstTime() bool {
 	marker := os.Getenv("FAKE_CRASH_MARKER")
 	if marker == "" {
-		return true // 没配 marker：每次都崩（会触发重启上限）
+		marker = os.Getenv("FAKE_DESYNC_MARKER")
+	}
+	if marker == "" {
+		return true // 没配 marker：每次都崩（会触发重启/重建上限）
 	}
 	if _, err := os.Stat(marker); err == nil {
 		return false
 	}
 	_ = os.WriteFile(marker, []byte("crashed"), 0o644)
 	return true
+}
+
+// writeHalfFrameThenExit 写一个"长度前缀完整、body 只写一半"的残帧，然后退出进程。
+// 用来模拟 sidecar 在推理中途崩溃 / 写响应写一半就断开。
+func writeHalfFrameThenExit(out *bufio.Writer, arg uint32) {
+	body := inferPayload(arg)
+	var hdr [4]byte
+	binary.LittleEndian.PutUint32(hdr[:], uint32(1+len(body)))
+	_, _ = out.Write(hdr[:])
+	_ = out.WriteByte(statusOK)
+	half := body
+	if len(half) > 5 {
+		half = half[:5]
+	}
+	_, _ = out.Write(half)
+	_ = out.Flush()
+	os.Exit(1)
 }
 
 // pingJSON 构造与 sidecar/depth_engine.py status() 同构的 PING 响应。

@@ -28,8 +28,12 @@ const (
 	// 注意：process_res 决定**几何细节的真实上限**（边界/遮挡关系），
 	// 与 max_points（颜色覆盖密度）是两件事，不要互相替代。
 	DefaultRes = 1008
-	// maxRestarts 是 sidecar 崩溃后的重启上限：只重启一次，避免崩溃循环。
+	// maxRestarts 是 sidecar **崩溃/EOF** 后的重启上限：只重启一次，避免崩溃循环。
 	maxRestarts = 1
+	// maxDesyncRepairs 是 **管道失步** 后的重建上限（与崩溃重启分开计数）。
+	// 失步是可自愈的：重建管道（关管道 → 杀进程 → 重启 → warmup）后重试即可；
+	// 连续 3 次还失步说明 sidecar 协议实现有问题，此时报错而不是无限重建。
+	maxDesyncRepairs = 3
 )
 
 // ManagerConfig 描述如何拉起 sidecar 以及各项超时。
@@ -71,11 +75,13 @@ type Status struct {
 	LoadSeconds      float64 `json:"load_seconds,omitempty"`
 	LastInferSeconds float64 `json:"last_infer_seconds"`
 
-	// PID 是当前 sidecar 进程号；Restarts 是已重启次数（上限 1）。
+	// PID 是当前 sidecar 进程号；Restarts 是崩溃重启次数（上限 maxRestarts）。
 	PID      int `json:"pid,omitempty"`
 	Restarts int `json:"restarts"`
+	// DesyncRepairs 是"管道失步"后的重建次数（独立预算，成功推理后清零）。
+	DesyncRepairs int `json:"desync_repairs"`
 
-	// Error 是预热失败原因（就绪后为空）。
+	// Error 是预热/管道失败原因（就绪后为空）。
 	Error string `json:"error,omitempty"`
 }
 
@@ -103,7 +109,10 @@ type Manager struct {
 	warmDone chan struct{}
 	closed   bool
 	restarts int
-	status   Status
+	// desyncBudget 是"本轮"已用的失步重建次数（成功的推理会清零）；
+	// 累计总数在 status.DesyncRepairs 里（health 展示，只增不清）。
+	desyncBudget int
+	status       Status
 }
 
 // NewManager 构造 Manager（不启动进程，需再调用 Start）。
@@ -306,6 +315,22 @@ func (m *Manager) Status() Status {
 	return s
 }
 
+// markNotReady 把 sidecar 标记为不可用（health 必须如实反映：ready=false + 原因）。
+func (m *Manager) markNotReady(err error) {
+	if err == nil {
+		return
+	}
+	m.mu.Lock()
+	m.ready = false
+	m.warming = false
+	m.warmErr = err
+	m.status.Ready = false
+	m.status.Warming = false
+	m.status.Error = err.Error()
+	m.mu.Unlock()
+	m.logf("sidecar 不可用：%v（/api/health 会显示 ready=false / degraded；desync_repairs=%d）", err, m.Status().DesyncRepairs)
+}
+
 // WaitReady 阻塞到 sidecar 就绪（或 ctx 结束 / 不可用）。
 func (m *Manager) WaitReady(ctx context.Context) error {
 	m.opMu.Lock()
@@ -340,8 +365,8 @@ func (m *Manager) waitReadyOp(ctx context.Context) error {
 		m.mu.Unlock()
 
 		if canRestart {
-			m.logf("sidecar 未就绪，尝试重启（唯一一次预算）：%v", warmErr)
-			if err := m.restartOp(ctx); err != nil {
+			m.logf("sidecar 未就绪，尝试重启（唯一一次崩溃预算）：%v", warmErr)
+			if err := m.restartOp(); err != nil {
 				return fmt.Errorf("sidecar 重启失败: %w（初始错误: %v）", err, warmErr)
 			}
 			continue
@@ -353,8 +378,8 @@ func (m *Manager) waitReadyOp(ctx context.Context) error {
 	}
 }
 
-// restartOp 关闭当前进程、拉起新进程并重新预热。调用方必须持有 opMu。
-func (m *Manager) restartOp(ctx context.Context) error {
+// restartOp 处理**进程崩溃/EOF**：关进程 → 拉起新进程 → warmup。调用方必须持有 opMu。
+func (m *Manager) restartOp() error {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -362,29 +387,75 @@ func (m *Manager) restartOp(ctx context.Context) error {
 	}
 	if m.restarts >= maxRestarts {
 		m.mu.Unlock()
-		return fmt.Errorf("已达重启上限（%d 次）", maxRestarts)
+		return fmt.Errorf("已达崩溃重启上限（%d 次）", maxRestarts)
 	}
 	m.restarts++
 	m.status.Restarts = m.restarts
 	old := m.client
 	m.client = nil
 	m.ready = false
+	m.warming = true
+	m.warmErr = nil
 	m.status.Ready = false
-	m.status.Error = ""
+	m.status.Warming = true
+	m.status.Error = "进程崩溃，正在重启"
 	m.mu.Unlock()
 
+	m.logf("重启 sidecar（第 %d 次）", m.restarts)
+	if err := m.rebuildSidecar(old); err != nil {
+		m.markNotReady(err)
+		return err
+	}
+	return nil
+}
+
+// repairDesyncOp 处理**管道失步**：重建整条管道并重新 warmup，然后由调用方重试。
+// 使用独立预算（maxDesyncRepairs），与崩溃重启互不影响；成功推理后预算清零。
+func (m *Manager) repairDesyncOp(cause error) error {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return ErrClosed
+	}
+	if m.desyncBudget >= maxDesyncRepairs {
+		m.mu.Unlock()
+		return fmt.Errorf("已连续重建管道 %d 次仍失步，放弃（需检查 sidecar 协议实现）", maxDesyncRepairs)
+	}
+	m.desyncBudget++
+	m.status.DesyncRepairs++ // health 展示累计重建次数（只增不清）
+	old := m.client
+	m.client = nil
+	m.ready = false
+	m.warming = true
+	m.warmErr = nil
+	m.status.Ready = false
+	m.status.Warming = true
+	m.status.Error = fmt.Sprintf("管道失步，正在重建（第 %d/%d 次）", m.desyncBudget, maxDesyncRepairs)
+	m.mu.Unlock()
+
+	m.logf("sidecar 管道失步（本轮第 %d/%d 次，累计 %d 次）：%v",
+		m.desyncBudget, maxDesyncRepairs, m.Status().DesyncRepairs, cause)
+	if err := m.rebuildSidecar(old); err != nil {
+		m.markNotReady(err)
+		return err
+	}
+	return nil
+}
+
+// rebuildSidecar 关闭旧客户端（关 stdin → 等进程退出）、拉起新进程并重新 warmup。
+// 用独立 context（不跟随调用方请求取消）：重建一旦开始就要走完，否则状态不一致。
+func (m *Manager) rebuildSidecar(old *Client) error {
 	if old != nil {
 		_ = old.Close()
 	}
-	m.logf("重启 sidecar（第 %d 次）", m.restarts)
 	if err := m.launch(); err != nil {
 		return err
 	}
 	c := m.currentClient()
 	if c == nil {
-		return errors.New("infer: 重启后客户端丢失")
+		return errors.New("infer: 重建后客户端丢失")
 	}
-	rctx, cancel := context.WithTimeout(ctx, m.cfg.WarmupTimeout)
+	rctx, cancel := context.WithTimeout(context.Background(), m.cfg.WarmupTimeout)
 	defer cancel()
 	if err := m.waitReady(rctx, c); err != nil {
 		return err
@@ -393,9 +464,14 @@ func (m *Manager) restartOp(ctx context.Context) error {
 	return nil
 }
 
-// Infer 发送图片做推理；管道层错误（sidecar 崩溃）时自动重启一次并重试。
+// Infer 发送图片做推理。
 //
-// 如果 sidecar 还在预热，会先等待就绪（最长 WarmupTimeout）。
+// 健壮性约定（线上事故修复）：
+//  1. sidecar 调用使用**独立于 HTTP 请求的 context**：客户端断开时也把响应读完，
+//     保证管道永远成帧——这是"一次中断不再让服务变砖"的根因修复；
+//  2. 管道失步（ErrDesync）→ 重建管道后重试，独立预算 maxDesyncRepairs；
+//  3. 进程崩溃/EOF → 沿用崩溃重启预算 maxRestarts；
+//  4. 出错后 health 必须如实反映（ready=false + 原因）。
 func (m *Manager) Infer(ctx context.Context, image []byte, processRes uint32) (*DepthResult, error) {
 	m.opMu.Lock()
 	defer m.opMu.Unlock()
@@ -409,31 +485,71 @@ func (m *Manager) Infer(ctx context.Context, image []byte, processRes uint32) (*
 	}
 
 	start := time.Now()
-	res, err := c.Infer(ctx, image, processRes)
+	res, err := m.inferOnce(c, image, processRes)
+
+	// ① 管道失步：重建管道（独立 3 次预算）后重试。
+	for repairs := 0; err != nil && errors.Is(err, ErrDesync) && repairs < maxDesyncRepairs; repairs++ {
+		m.logf("推理时 sidecar 管道失步，重建管道后重试：%v", err)
+		if rerr := m.repairDesyncOp(err); rerr != nil {
+			m.markNotReady(rerr) // health 必须反映不可用
+			return nil, fmt.Errorf("sidecar 管道重建失败: %w（原始错误: %v）", rerr, err)
+		}
+		c = m.currentClient()
+		if c == nil {
+			return nil, errors.New("infer: sidecar 客户端缺失")
+		}
+		res, err = m.inferOnce(c, image, processRes)
+	}
+
+	// ② 进程崩溃/EOF：沿用"重启一次"预算。
 	if err != nil && m.shouldRestart(err) {
-		m.logf("推理时 sidecar 管道错误，重启一次后重试：%v", err)
-		if rerr := m.restartOp(ctx); rerr != nil {
+		m.logf("推理时 sidecar 进程错误，重启一次后重试：%v", err)
+		if rerr := m.restartOp(); rerr != nil {
+			m.markNotReady(rerr) // 重启预算耗尽也必须诚实报告，不能假装 ready
 			return nil, fmt.Errorf("sidecar 重启失败: %w（原始错误: %v）", rerr, err)
 		}
 		c = m.currentClient()
 		if c == nil {
 			return nil, errors.New("infer: sidecar 客户端缺失")
 		}
-		res, err = c.Infer(ctx, image, processRes)
+		res, err = m.inferOnce(c, image, processRes)
 	}
+
 	if err != nil {
+		// 管道/进程类错误：health 必须显示不可用，不能假装 ready。
+		if isSidecarBroken(err) {
+			m.markNotReady(err)
+		}
 		return nil, err
 	}
 
 	m.mu.Lock()
 	m.status.LastInferSeconds = time.Since(start).Seconds()
+	m.ready = true
+	m.warmErr = nil
 	m.status.Ready = true
+	m.status.Error = ""
+	// 这次推理成功了：失步重建预算清零（累计次数保留，供 health 观察）。
+	m.desyncBudget = 0
 	m.mu.Unlock()
+
+	// 调用方在推理期间取消了：结果丢弃（管道已同步），交给 HTTP 层返回非 2xx。
+	if cerr := ctx.Err(); cerr != nil {
+		return nil, fmt.Errorf("推理完成但请求已取消（结果丢弃，管道保持同步）: %w", cerr)
+	}
 	return res, nil
 }
 
-// shouldRestart 判断错误是否属于"进程/管道已坏"，值得重启一次。
-// 业务错误（RemoteError）不重启：sidecar 还活着，只是这次请求被拒绝。
+// inferOnce 用**独立于 HTTP 请求的 context** 调 sidecar。
+// 客户端取消/断开时仍然把响应读完（结果丢弃），这是防止管道失步的关键。
+func (m *Manager) inferOnce(c *Client, image []byte, processRes uint32) (*DepthResult, error) {
+	opCtx, cancel := context.WithTimeout(context.Background(), m.cfg.InferTimeout)
+	defer cancel()
+	return c.Infer(opCtx, image, processRes)
+}
+
+// shouldRestart 判断错误是否属于"进程崩溃/EOF"，值得用崩溃预算重启一次。
+// 管道失步走独立的 repairDesyncOp；业务错误（RemoteError）不重启。
 func (m *Manager) shouldRestart(err error) bool {
 	if err == nil {
 		return false
@@ -445,7 +561,22 @@ func (m *Manager) shouldRestart(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	return errors.Is(err, ErrProtocol)
+	return errors.Is(err, ErrProtocol) && !errors.Is(err, ErrDesync)
+}
+
+// isSidecarBroken 报告错误是否意味着 sidecar/管道已不可用（health 应显示 ready=false）。
+func isSidecarBroken(err error) bool {
+	if err == nil {
+		return false
+	}
+	var remote *RemoteError
+	if errors.As(err, &remote) {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return errors.Is(err, ErrProtocol) || errors.Is(err, ErrDesync) || errors.Is(err, ErrClosed)
 }
 
 // PID 返回当前 sidecar 进程号（无进程时 0）。

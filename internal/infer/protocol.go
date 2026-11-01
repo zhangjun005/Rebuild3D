@@ -48,6 +48,10 @@ const (
 var (
 	// ErrProtocol 表示帧格式错误或管道层面的失败。
 	ErrProtocol = errors.New("infer: 协议错误")
+	// ErrDesync 表示管道**失步**：响应帧边界已错位（长度/状态字非法），
+	// 之后的字节都不能再信任，必须重建整条管道（关管道 → 杀进程 → 重启 → warmup）。
+	// 与"进程崩溃/EOF"分开，因为两者的修复预算与策略不同。
+	ErrDesync = errors.New("infer: 管道失步")
 	// ErrClosed 表示客户端已关闭。
 	ErrClosed = errors.New("infer: 客户端已关闭")
 	// ErrRemote 是 sidecar 以 status=1 返回错误的哨兵（用 errors.Is 判断）。
@@ -126,8 +130,11 @@ func encodeRequest(cmd byte, arg uint32, body []byte) ([]byte, error) {
 }
 
 // readResponse 从 r 读一帧响应，返回 status=0 时的 body（已去掉 status 字节）。
-// status=1 时返回 *RemoteError；帧格式错误返回包装了 ErrProtocol 的错误；
-// 底层读失败（例如 sidecar 退出）同样包装 ErrProtocol 并保留原因。
+//
+// 错误分类（上层据此决定"重建管道"还是"重启进程"）：
+//   - status=1 → *RemoteError（管道仍然可用）；
+//   - 长度/状态字非法 → **ErrDesync**（帧边界已错位，管道不可再用）；
+//   - 读到 EOF / 半帧 → ErrProtocol（进程崩溃/退出，管道已断）。
 func readResponse(r io.Reader, cmd byte) ([]byte, error) {
 	var hdr [4]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
@@ -135,7 +142,7 @@ func readResponse(r io.Reader, cmd byte) ([]byte, error) {
 	}
 	n := binary.LittleEndian.Uint32(hdr[:])
 	if n == 0 || n > MaxFrameBytes {
-		return nil, fmt.Errorf("%w: 响应长度非法 %d", ErrProtocol, n)
+		return nil, fmt.Errorf("%w: %w: 响应长度非法 %d（帧边界已错位）", ErrProtocol, ErrDesync, n)
 	}
 	buf := make([]byte, int(n))
 	if _, err := io.ReadFull(r, buf); err != nil {
@@ -147,7 +154,7 @@ func readResponse(r io.Reader, cmd byte) ([]byte, error) {
 	case StatusError:
 		return nil, &RemoteError{Cmd: cmd, Message: string(buf[1:])}
 	default:
-		return nil, fmt.Errorf("%w: 未知响应状态 %d", ErrProtocol, buf[0])
+		return nil, fmt.Errorf("%w: %w: 未知响应状态 %d（帧边界不可信）", ErrProtocol, ErrDesync, buf[0])
 	}
 }
 

@@ -198,6 +198,129 @@ func TestManagerCloseSendsUnloadAndReapsChild(t *testing.T) {
 	}
 }
 
+// TestManagerRepairsDesync 验证「管道失步能自愈」：
+// 失步后重建管道（独立预算，不占用崩溃重启预算）并重试成功，health 如实累加 desync_repairs。
+func TestManagerRepairsDesync(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "desync.marker")
+	m, _ := startTestManager(t, "desync-once", "FAKE_DESYNC_MARKER="+marker)
+	waitReady(t, m)
+
+	res, err := m.Infer(context.Background(), []byte{1, 2, 3}, 0)
+	if err != nil {
+		t.Fatalf("失步后应重建管道并重试成功: %v", err)
+	}
+	if res.Width != 5 || res.Height != 3 {
+		t.Errorf("重试结果异常：%dx%d", res.Width, res.Height)
+	}
+	st := m.Status()
+	if st.DesyncRepairs != 1 {
+		t.Errorf("desync_repairs = %d，期望 1", st.DesyncRepairs)
+	}
+	if st.Restarts != 0 {
+		t.Errorf("失步不应占用崩溃重启预算，restarts = %d", st.Restarts)
+	}
+	if !st.Ready || st.Error != "" {
+		t.Errorf("重建成功后状态应恢复 ready：%+v", st)
+	}
+	if _, err := m.Infer(context.Background(), []byte{4}, 0); err != nil {
+		t.Fatalf("重建后应持续可用: %v", err)
+	}
+	// health 里 desync_repairs 是累计次数（只增不清），成功推理只重置"本轮预算"。
+	if st := m.Status(); st.DesyncRepairs != 1 {
+		t.Errorf("累计 desync_repairs = %d，期望 1", st.DesyncRepairs)
+	}
+}
+
+// TestManagerHalfResponseCrashRestart 是事故场景的回归测试：
+// 假 sidecar 在 INFER 时「只写半帧就断开」→ 客户端读到 EOF（不完整帧）→
+// 按进程崩溃重启一次 → 重试成功。
+func TestManagerHalfResponseCrashRestart(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "crash.marker")
+	m, _ := startTestManager(t, "half-once", "FAKE_CRASH_MARKER="+marker)
+	waitReady(t, m)
+
+	res, err := m.Infer(context.Background(), []byte{1, 2, 3}, 0)
+	if err != nil {
+		t.Fatalf("半帧断开后应重启一次并重试成功: %v", err)
+	}
+	if res.Width != 5 {
+		t.Errorf("重试结果异常：%dx%d", res.Width, res.Height)
+	}
+	st := m.Status()
+	if st.Restarts != 1 {
+		t.Errorf("restarts = %d，期望 1", st.Restarts)
+	}
+	if st.DesyncRepairs != 0 {
+		t.Errorf("半帧 EOF 属于进程崩溃，不应算作失步重建：desync_repairs=%d", st.DesyncRepairs)
+	}
+	if !st.Ready {
+		t.Errorf("重启后状态应恢复 ready：%+v", st)
+	}
+}
+
+// TestManagerDesyncRepairBudgetExhausted 验证连续失步会耗尽重建预算，
+// 并把「不可用」如实反映到 health（ready=false + 原因），而不是假装正常。
+func TestManagerDesyncRepairBudgetExhausted(t *testing.T) {
+	// 不配 marker：每个新 sidecar 进程第一次 INFER 都会失步，必然耗尽预算。
+	m, _ := startTestManager(t, "desync-once")
+	waitReady(t, m)
+
+	_, err := m.Infer(context.Background(), []byte{1}, 0)
+	if err == nil {
+		t.Fatal("连续失步应最终失败，而不是假装成功")
+	}
+	if !errors.Is(err, ErrDesync) && !errors.Is(err, ErrProtocol) {
+		t.Errorf("错误 = %v，期望 ErrDesync/ErrProtocol", err)
+	}
+	st := m.Status()
+	if st.Ready {
+		t.Error("health 必须显示 ready=false")
+	}
+	if st.DesyncRepairs != maxDesyncRepairs {
+		t.Errorf("desync_repairs = %d，期望耗尽为 %d", st.DesyncRepairs, maxDesyncRepairs)
+	}
+	if st.Error == "" {
+		t.Error("health 必须给出失败原因")
+	}
+}
+
+// TestManagerAbortedCallerKeepsSidecarHealthy 验证根因修复：
+// 调用方在推理中途取消（关页面/取消上传）后，sidecar 管道保持同步、health 保持 ready，
+// 下一次请求正常——不会像事故那样"用着用着就废了"。
+func TestManagerAbortedCallerKeepsSidecarHealthy(t *testing.T) {
+	m, _ := startTestManager(t, "ok", "FAKE_INFER_DELAY_MS=150")
+	waitReady(t, m)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := m.Infer(ctx, []byte{1}, 0)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("取消后的错误 = %v，期望 context.DeadlineExceeded", err)
+	}
+	// sidecar 调用用独立 context：取消时仍会把这帧读完（约 150ms 延迟）。
+	if el := time.Since(start); el < 120*time.Millisecond {
+		t.Errorf("返回过早（%v）：没有排空响应，管道会失步", el)
+	}
+
+	st := m.Status()
+	if !st.Ready {
+		t.Errorf("请求取消不应让 sidecar 变成不可用：%+v", st)
+	}
+	if st.DesyncRepairs != 0 || st.Restarts != 0 {
+		t.Errorf("请求取消不应触发重建/重启：desync=%d restarts=%d", st.DesyncRepairs, st.Restarts)
+	}
+
+	// 关键断言：下一次请求必须正常。
+	res, err := m.Infer(context.Background(), []byte{2}, 0)
+	if err != nil {
+		t.Fatalf("取消之后的下一次推理失败（管道失步）: %v", err)
+	}
+	if res.Width != 5 {
+		t.Errorf("结果异常：%dx%d", res.Width, res.Height)
+	}
+}
+
 // TestManagerBadPython 验证拉起失败不会 panic/永久阻塞，而是给出可读错误。
 func TestManagerBadPython(t *testing.T) {
 	m := NewManager(ManagerConfig{

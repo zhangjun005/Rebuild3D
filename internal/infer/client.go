@@ -19,6 +19,9 @@ const (
 	defaultInferTimeout  = 60 * time.Second
 	defaultUnloadTimeout = 10 * time.Second
 	closeGrace           = 5 * time.Second
+	// drainGrace 是"调用被取消后，允许等这一帧读完"的上限。
+	// 读完 → 管道保持同步；读不完 → 判定失步，交给上层重建管道。
+	drainGrace = 10 * time.Second
 )
 
 // Config 描述如何拉起 sidecar 以及各项超时。
@@ -163,12 +166,19 @@ func (c *Client) Unload(ctx context.Context) error {
 	return err
 }
 
-// call 完成一次"写请求 + 读响应"，并在超时/管道错误后把客户端标记为损坏。
+// call 完成一次"写请求 + 读响应"。
+//
+// 管道纪律（这个函数是整条链路的根）：
+//  1. 请求与响应必须**成对消费**：绝不能在"响应只读了一半"时把管道交还给下一个请求，
+//     否则剩余字节会被当成下一帧的 total_len，管道永久失步（线上事故：926505755）。
+//  2. 父 ctx 取消时：继续把这帧读完（结果丢弃），保持管道同步；只有读不干净才报废管道。
+//  3. 只有真正的协议错位（ErrDesync）或 EOF/崩溃才把客户端标记为 broken，交给上层重建。
 func (c *Client) call(ctx context.Context, cmd byte, arg uint32, body []byte, timeout time.Duration) ([]byte, error) {
 	req, err := encodeRequest(cmd, arg, body)
 	if err != nil {
 		return nil, err
 	}
+	// 调用方已经取消：一个字节都不要写（避免留下半帧）。管道保持干净。
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -192,7 +202,7 @@ func (c *Client) call(ctx context.Context, cmd byte, arg uint32, body []byte, ti
 		return nil, c.broken
 	}
 
-	// 读操作放到 goroutine 里，这样 ctx 超时时能返回而不是永久阻塞。
+	// 读操作放到 goroutine 里：这样 ctx 取消时还能选择"等它读完"（排空管道）。
 	type result struct {
 		body []byte
 		err  error
@@ -204,22 +214,37 @@ func (c *Client) call(ctx context.Context, cmd byte, arg uint32, body []byte, ti
 	}()
 
 	select {
-	case <-ctx.Done():
-		// 读 goroutine 可能还阻塞在管道上：报废客户端，避免并发读写同一条管道。
-		c.broken = fmt.Errorf("%w: 等待 %s 响应超时: %w", ErrProtocol, cmdName(cmd), ctx.Err())
-		return nil, c.broken
 	case r := <-ch:
-		if r.err != nil {
-			var remote *RemoteError
-			if errors.As(r.err, &remote) {
-				// 远端业务错误：帧完整、管道仍然可用。
-				return nil, r.err
+		return c.accept(cmd, r.body, r.err)
+	case <-ctx.Done():
+		// 父 ctx 取消/超时：**必须把这一帧读完**，否则剩余字节会污染下一帧。
+		select {
+		case r := <-ch:
+			if r.err != nil {
+				return c.accept(cmd, nil, r.err) // 读这一帧时管道已坏：优先报告管道错误
 			}
-			c.broken = r.err
-			return nil, r.err
+			// 管道已同步，但结果没人要了：丢弃并返回 ctx 错误。
+			return nil, fmt.Errorf("infer: 等待 %s 响应的调用被取消（已排空响应，管道保持同步）: %w", cmdName(cmd), ctx.Err())
+		case <-time.After(drainGrace):
+			// 排不干净（sidecar 卡死/半帧）：管道不可再信任，交给上层重建。
+			c.broken = fmt.Errorf("%w: %w: 等待 %s 响应被取消后 %v 内仍未排空管道",
+				ErrProtocol, ErrDesync, cmdName(cmd), drainGrace)
+			return nil, c.broken
 		}
-		return r.body, nil
 	}
+}
+
+// accept 统一处理一次读完的响应：业务错误不损坏管道；协议/崩溃错误标记 broken。
+func (c *Client) accept(cmd byte, body []byte, err error) ([]byte, error) {
+	if err == nil {
+		return body, nil
+	}
+	var remote *RemoteError
+	if errors.As(err, &remote) {
+		return nil, err // 帧完整、管道仍然可用
+	}
+	c.broken = err
+	return nil, err
 }
 
 // Close 优雅关闭：先关 stdin 让 sidecar 读到 EOF 自行退出，超时则强杀。

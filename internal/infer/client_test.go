@@ -1,6 +1,7 @@
 package infer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os/exec"
@@ -29,11 +30,13 @@ func buildFakeSidecar(t *testing.T) string {
 }
 
 // startFake 启动一个指定模式的假 sidecar 客户端，测试结束时关闭。
-func startFake(t *testing.T, mode string) *Client {
+// extraEnv 用于追加 FAKE_* 环境变量（例如推理延迟、崩溃 marker）。
+func startFake(t *testing.T, mode string, extraEnv ...string) *Client {
 	t.Helper()
+	env := append([]string{"FAKE_MODE=" + mode}, extraEnv...)
 	c, err := Start(context.Background(), Config{
 		Path:          buildFakeSidecar(t),
-		Env:           []string{"FAKE_MODE=" + mode},
+		Env:           env,
 		Logf:          t.Logf,
 		PingTimeout:   10 * time.Second,
 		InferTimeout:  10 * time.Second,
@@ -179,6 +182,51 @@ func TestCallerCancelDoesNotBreakClient(t *testing.T) {
 	}
 	if info.Model == "" {
 		t.Error("重新 Ping 结果为空")
+	}
+}
+
+// TestCanceledInferKeepsPipeInSync 是"管道失步"事故的客户端层回归测试。
+//
+// 事故：调用方中途取消时，旧实现直接放弃读取；sidecar 已经写出的剩余字节留在管道里，
+// 下一个请求把它当成新的 total_len → 读到 926505755 这种垃圾 → 管道永久失步。
+// 修复后：取消时必须先把这一帧**读完**（结果丢弃）再返回，管道保持成帧。
+func TestCanceledInferKeepsPipeInSync(t *testing.T) {
+	c := startFake(t, "ok", "FAKE_INFER_DELAY_MS=150")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := c.Infer(ctx, []byte{1, 2, 3}, 0); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("取消后的错误 = %v，期望 context.DeadlineExceeded", err)
+	}
+	// 必须在返回前排空响应：耗时应该接近 fake 的 150ms 延迟，而不是 20ms。
+	if el := time.Since(start); el < 120*time.Millisecond {
+		t.Errorf("取消返回过早（%v）：没有排空响应，管道会失步", el)
+	}
+
+	// 关键断言：管道仍同步 → 下一次请求必须成功。
+	res, err := c.Infer(context.Background(), []byte{4, 5, 6}, 0)
+	if err != nil {
+		t.Fatalf("取消之后的下一次 Infer 失败（管道失步）: %v", err)
+	}
+	if res.Width != 5 || res.Height != 3 {
+		t.Errorf("下一次 Infer 结果异常：%dx%d", res.Width, res.Height)
+	}
+	if _, err := c.Ping(context.Background()); err != nil {
+		t.Fatalf("取消之后 Ping 失败: %v", err)
+	}
+}
+
+// TestDesyncErrorClassification 验证非法长度/状态字被归类为 ErrDesync（而不是普通崩溃）。
+func TestDesyncErrorClassification(t *testing.T) {
+	// 合法帧头之后跟一个垃圾长度：模拟拿到错位的 4 字节。
+	bogus := []byte{0x9B, 0x1A, 0x37, 0x00} // 小端 = 3611675 之类，仍 < MaxFrameBytes 时换更大的
+	bogus = []byte{0xDB, 0x3C, 0x3A, 0x37}  // 926505755 > MaxFrameBytes
+	if _, err := readResponse(bytes.NewReader(bogus), CmdInfer); !errors.Is(err, ErrDesync) || !errors.Is(err, ErrProtocol) {
+		t.Errorf("非法长度错误 = %v，期望同时 errors.Is ErrDesync+ErrProtocol", err)
+	}
+	if _, err := readResponse(bytes.NewReader(frame(9, nil)), CmdInfer); !errors.Is(err, ErrDesync) {
+		t.Errorf("未知状态字错误 = %v，期望 ErrDesync", err)
 	}
 }
 
