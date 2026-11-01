@@ -50,20 +50,30 @@ conda create -n illust3d python=3.10 -y
 
 ```
 PIP_CACHE_DIR    = E:\cache\pip          # pip 缓存离开 C 盘
-PIP_REQUIRE_VIRTUALENV = 1               # ★硬闸：不在虚拟环境里 pip 直接拒绝安装
 PYTHONNOUSERSITE = 1                     # ★隔离：不读 C:\Users\zj\AppData\Roaming\Python 下的包
 HF_HOME          = E:\models\hf          # HuggingFace 模型与缓存
 HF_ENDPOINT      = https://hf-mirror.com # 国内镜像
 TORCH_HOME       = E:\models\torch       # torch hub 缓存
 ```
 
-**这三条是"不污染全局"的核心保障：**
+**两条是"不污染全局"的核心保障：**
 
 | 变量 | 作用 |
 |---|---|
-| `PIP_REQUIRE_VIRTUALENV=1` | 就算手滑在 base 里敲 `pip install`，pip 会**直接报错拒绝**，而不是默默装进去 |
 | `PYTHONNOUSERSITE=1` | 不会意外 import 到 `%APPDATA%\Python` 里的用户级包（那是另一个隐性污染源） |
 | `PIP_CACHE_DIR` | pip 缓存不进 C 盘 |
+
+> ### 踩过的坑：`PIP_REQUIRE_VIRTUALENV` 和 conda 不兼容（2026-11 实测）
+>
+> 原本还打算设 `PIP_REQUIRE_VIRTUALENV=1` 当"硬闸"——手滑在 base 里 `pip install` 会直接拒绝。
+> **但它会让 env 自己的 pip 也拒绝工作**，报 `Could not find an activated virtualenv (required)`。
+> 原因：pip 只把 venv 认作虚拟环境，而 conda env 里 `sys.prefix == sys.base_prefix`，pip 判定"不在虚拟环境里"。
+>
+> **改用两条更实在的保障：**
+> 1. **永远显式调用 env 解释器的绝对路径**：`E:\conda\envs_dirs\illust3d\python.exe -m pip`，不用裸 `pip` / `python`
+> 2. `scripts/setup-env.ps1` 开头断言 `sys.prefix` 必须落在 `E:\conda\envs_dirs` 下，否则直接中止
+>
+> 教训：**"硬闸"要选在真正能生效的层**。隔离靠的是"永远不碰 base 的解释器"，不是靠一个开关变量。
 
 ### 1.3 装依赖：最小起步，缺什么补什么
 
@@ -217,14 +227,14 @@ Rebuild3D/
 | `arg` | uint32 | INFER 时为 `process_res`，0 表示用默认 |
 | `body` | bytes | INFER 时是**原始图片字节**（不重新编码） |
 
-**响应帧**（Python → Go）：
+**响应帧**（Python → Go）：**同样带 4 字节长度前缀**，结构 = `total_len(u32) + status(u8) + body`
 
-| `cmd` | 响应体 |
+| `cmd` | `status=0` 时的 body |
 |---|---|
 | PING | UTF-8 JSON：`{model, device, vram_used_mb, ready}` |
 | INFER | `width` / `height` / `flags`（uint32×3）+ `depth` float32[W*H] + `conf` float32[W*H]（仅 `flags&1` 时存在） |
 | UNLOAD | 空 |
-| 错误 | `status=1` + UTF-8 错误信息 |
+| 任意 | `status=1` 时 body = UTF-8 错误信息；`total_len = 1 + len(body)` |
 
 **为什么不用 JSON/base64**：一张 504×378 的 float32 深度图约 0.76 MB，base64 后 1.0 MB 且要两次解析。二进制一行代码搞定。
 
@@ -250,6 +260,28 @@ col     u8[3*count]
 > **渲染只在浏览器。Go 和 Python 都不做渲染。**
 
 理由：风格化是 shader 的核心价值，服务端渲染需要 headless 浏览器（重）。v1 的动图导出用浏览器内置 `MediaRecorder` 录 WebM（零依赖），GIF 留到需要时再加。
+
+### 4.4 反投影的相机约定（必须三端一致）
+
+§4.1 只定义了协议，没定义几何。若 Go 反投影和前端/文档对不上，点云会镜像或上下颠倒。约定如下：
+
+| 项 | 约定 |
+|---|---|
+| 坐标系 | `+x` 右 / `+y` 上 / `+z` 指向观察者（OpenGL 习惯，右手系） |
+| 像素中心 | 取 `(u+0.5, v+0.5)`，避免半像素偏移 |
+| 透视反投影 | `x = (u + 0.5 - cx) * d / fx`，`y = (cy - v - 0.5) * d / fy`，`z = d` |
+| 正交反投影 | `x = (u + 0.5 - cx) * scale`，`y = (cy - v - 0.5) * scale`，`z = d * scale` |
+| 无效深度 | 输出零值点并**保持逐像素 1:1 下标**（不要压缩数组，过滤交给 `FilterDepthEdges`） |
+| `FilterDepthEdges` | 返回**丢弃掩码**（`true` = 丢弃），阈值为绝对深度差，跳变正负两侧都标记 |
+| `VoxelDownsample` | 代表点取格内位置/颜色均值，输出按格坐标字典序 → 与并行度无关、逐位可复现 |
+| 法线 | PCA 固有朝向**未统一**，渲染侧需按视线翻转 |
+
+### 4.5 端口
+
+**默认 `127.0.0.1:18123`**（可用 `-addr` 覆盖）。
+
+原计划用 8123，但本机 `0.0.0.0:8123` 与 `127.0.0.1:8123` 被无关系统进程 **ParkCloud** 占用，
+绑定会失败。18123 已实测可用。这也是"默认端口必须可覆盖"的原因——不要把它写死在代码里。
 
 ---
 

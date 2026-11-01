@@ -31,7 +31,9 @@ import (
 var version = "0.0.0-dev"
 
 const (
-	defaultAddr    = "127.0.0.1:8123"
+	// 默认端口 18123：本机 8123 被无关系统进程（ParkCloud）占用，
+	// 见 docs/selection.md §4.5。换端口用 -addr。
+	defaultAddr    = "127.0.0.1:18123"
 	defaultFixture = "testdata/sample.ilcl"
 	shutdownGrace  = 5 * time.Second
 )
