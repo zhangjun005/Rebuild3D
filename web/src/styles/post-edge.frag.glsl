@@ -44,10 +44,19 @@ const vec3 LUMA = vec3(0.299, 0.587, 0.114);
 /** 彩色点画：色调分离 → 屏幕空间网点叠墨 → 纸纹 */
 vec3 printify(vec3 src) {
   vec3 col = src;
-  // 1) 轻度色调分离（"像印刷品"的关键；5 级左右刚好）
+  // 1) 色调分离：**只量化亮度，保留色度**
+  //
+  // 为什么不能逐 RGB 通道量化：三个通道各自被拉到最近档位，色相/饱和度会被破坏
+  // （实测 posterize=6 时脸/眼睛直接糊成一坨，背景却更浓）。
+  // 这里按亮度算出一个标量 Lq，再把颜色按 Lq/Lum 等比缩放：
+  //   - 明暗被压成 N 档（印刷的分层感）
+  //   - 颜色比例不变（粉色还是粉的，脸不被通道量化打碎）
   float levels = uColorPosterize;
   if (levels >= 2.0) {
-    col = floor(col * levels + 0.5) / levels;
+    float lum = clamp(dot(col, LUMA), 0.0, 1.0);
+    float lq = floor(lum * levels + 0.5) / levels;
+    col = col * (lq / max(lum, 0.02));
+    col = clamp(col, 0.0, 1.0);
   }
   // 2) 屏幕空间网点：暗部叠墨点多一些，亮部留白 → 印刷的调子层
   float lum = clamp(dot(col, LUMA), 0.0, 1.0);

@@ -162,7 +162,7 @@ const DEFAULTS = {
   parallaxMode: true,
   parallaxAmount: 4,
   colorMode: 1,
-  colorPosterize: 6,
+  colorPosterize: 10,
   colorHalftone: 0,
   renderMode: 'cloud', // 产品路径 = 点云；图像模式只做对照
   inkSource: 1,
@@ -185,7 +185,8 @@ export const PRESETS: Record<PresetKey, Preset> = {
     params: {
       ...DEFAULTS,
       pointSize: 2.6,
-      softness: 0.25, // 硬一点的圆片：软边半透明会把颜色混成粉彩
+      // 软边在这里是**用来填点缝、提高饱和度的**，不是柔化：硬边会让点缝全露纸色 → 反而更淡。
+      softness: 0.25,
       density: 1.0,
       stipple: 0.0, // 点密度不再由亮度决定（colorMode 会强制归零）
       densityGamma: 1.0,
@@ -205,7 +206,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
       boil: false,
       paper: '#ffffff', // 纯白纸：暖纸色会吃掉颜色饱和度
       colorMode: 1,
-      colorPosterize: 6,
+      colorPosterize: 10,
       colorHalftone: 0,
     },
   },
@@ -214,7 +215,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
     params: {
       ...DEFAULTS,
       pointSize: 2.6,
-      softness: 0.25, // 硬一点的圆片：软边半透明会把颜色混成粉彩
+      softness: 0.6,
       density: 1.0,
       stipple: 0.9,
       colorMode: 0, // 单色墨量路径（亮度→点密度）
