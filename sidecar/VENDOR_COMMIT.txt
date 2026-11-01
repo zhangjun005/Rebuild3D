@@ -1,0 +1,4 @@
+﻿Depth-Anything-3
+repo  : https://github.com/ByteDance-Seed/Depth-Anything-3
+commit: 3d835ec1a5802d64a8b8b15f817a1ab54809bfe4
+note  : 由 scripts/setup-env.ps1 固定；升级时删除 sidecar/vendor/Depth-Anything-3 重新运行。

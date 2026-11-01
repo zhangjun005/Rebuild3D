@@ -50,6 +50,7 @@ $EnvPy       = Join-Path $EnvDir 'python.exe'
 $ActivateDir = Join-Path $EnvDir 'etc\conda\activate.d'
 $VendorDir   = Join-Path $RepoRoot 'sidecar\vendor\Depth-Anything-3'
 $CachePip    = 'E:\cache\pip'
+$CacheTmp    = 'E:\cache\tmp'
 $ModelsDir   = 'E:\models'
 $HfHome      = Join-Path $ModelsDir 'hf'
 $TorchHome   = Join-Path $ModelsDir 'torch'
@@ -70,6 +71,20 @@ Ok "envs_dirs: $EnvsDir"
 $free = (Get-PSDrive E).Free / 1GB
 Write-Host ("  E 盘剩余 {0:N1} GB" -f $free)
 if ($free -lt 12) { throw "E 盘空间不足 12 GB，先清理再跑" }
+
+# C 盘护栏：本脚本的所有下载都必须落 E 盘，但不小心就会漏。
+# 实测踩过：只重定向 PIP_CACHE_DIR 不够，pip 的「临时解包目录」仍走 %TEMP%，
+# 2.4 GB 的 torch 轮子直接把 C 盘从 3.8 GB 吃到 1.1 GB。
+$freeC = (Get-PSDrive C).Free / 1GB
+Write-Host ("  C 盘剩余 {0:N1} GB" -f $freeC)
+if ($freeC -lt 2.5) { Warn "C 盘只剩 $([math]::Round($freeC,1)) GB，跑完请尽快清理；下面会把 TEMP 也指向 E 盘" }
+
+# 关键：把临时目录一起搬到 E 盘。pip / huggingface_hub / torch 都会用它。
+New-Item -ItemType Directory -Path $CacheTmp -Force | Out-Null
+$env:TMP = $CacheTmp
+$env:TEMP = $CacheTmp
+$env:TMPDIR = $CacheTmp
+Ok "TEMP/TMP/TMPDIR -> $CacheTmp"
 
 # ── 1. 建 conda env ───────────────────────────────────────────────────────
 Step "conda env: $EnvName"
@@ -97,14 +112,18 @@ Ok "sys.prefix = $prefix"
 Step 'activate.d 环境变量'
 New-Item -ItemType Directory -Path $ActivateDir -Force | Out-Null
 New-Item -ItemType Directory -Path $CachePip -Force | Out-Null
+New-Item -ItemType Directory -Path $CacheTmp -Force | Out-Null
 New-Item -ItemType Directory -Path $HfHome -Force | Out-Null
 New-Item -ItemType Directory -Path $TorchHome -Force | Out-Null
 
 $ps1 = @"
 # 由 scripts/setup-env.ps1 生成，勿手改。
-# 目标：不污染全局环境 + 所有缓存落 E 盘（C 盘只剩 ~3.9GB）
+# 目标：不污染全局环境 + 所有缓存/临时文件落 E 盘（C 盘只剩 ~2.5GB）
 `$env:PIP_CACHE_DIR          = '$CachePip'
 `$env:PYTHONNOUSERSITE       = '1'
+`$env:TMP                    = '$CacheTmp'
+`$env:TEMP                   = '$CacheTmp'
+`$env:TMPDIR                 = '$CacheTmp'
 `$env:HF_HOME                = '$HfHome'
 `$env:HF_ENDPOINT            = 'https://hf-mirror.com'
 `$env:TORCH_HOME             = '$TorchHome'
@@ -114,6 +133,9 @@ $bat = @"
 rem 由 scripts/setup-env.ps1 生成，勿手改。
 set "PIP_CACHE_DIR=$CachePip"
 set "PYTHONNOUSERSITE=1"
+set "TMP=$CacheTmp"
+set "TEMP=$CacheTmp"
+set "TMPDIR=$CacheTmp"
 set "HF_HOME=$HfHome"
 set "HF_ENDPOINT=https://hf-mirror.com"
 set "TORCH_HOME=$TorchHome"
@@ -126,6 +148,9 @@ Ok "已写入 $ActivateDir"
 # 注意：这里刻意不设 PIP_REQUIRE_VIRTUALENV —— pip 不认 conda env，设了会让 pip 拒绝执行。
 $env:PIP_CACHE_DIR = $CachePip
 $env:PYTHONNOUSERSITE = '1'
+$env:TMP = $CacheTmp
+$env:TEMP = $CacheTmp
+$env:TMPDIR = $CacheTmp
 $env:HF_HOME = $HfHome
 $env:HF_ENDPOINT = 'https://hf-mirror.com'
 $env:TORCH_HOME = $TorchHome
