@@ -162,8 +162,8 @@ const DEFAULTS = {
   parallaxMode: true,
   parallaxAmount: 4,
   colorMode: 1,
-  colorPosterize: 5,
-  colorHalftone: 0.55,
+  colorPosterize: 6,
+  colorHalftone: 0,
   renderMode: 'cloud', // 产品路径 = 点云；图像模式只做对照
   inkSource: 1,
   inkPolarity: 0,
@@ -185,11 +185,11 @@ export const PRESETS: Record<PresetKey, Preset> = {
     params: {
       ...DEFAULTS,
       pointSize: 2.6,
-      softness: 0.6,
+      softness: 0.25, // 硬一点的圆片：软边半透明会把颜色混成粉彩
       density: 1.0,
       stipple: 0.0, // 点密度不再由亮度决定（colorMode 会强制归零）
       densityGamma: 1.0,
-      edgeStrength: 0.15, // 线稿在颜色里，深度描边只留一点点
+      edgeStrength: 0.0, // 线稿已经在每点颜色里，描边只会加粗黑边
       edgeThreshold: 0.35,
       edgeWidth: 2.0,
       fogAmount: 0.0,
@@ -203,10 +203,10 @@ export const PRESETS: Record<PresetKey, Preset> = {
       halftoneAngle: 45,
       engraving: 0.0,
       boil: false,
-      paper: '#f6f0e4',
+      paper: '#ffffff', // 纯白纸：暖纸色会吃掉颜色饱和度
       colorMode: 1,
-      colorPosterize: 5,
-      colorHalftone: 0.5,
+      colorPosterize: 6,
+      colorHalftone: 0,
     },
   },
   'stipple-print': {
@@ -214,7 +214,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
     params: {
       ...DEFAULTS,
       pointSize: 2.6,
-      softness: 0.6,
+      softness: 0.25, // 硬一点的圆片：软边半透明会把颜色混成粉彩
       density: 1.0,
       stipple: 0.9,
       colorMode: 0, // 单色墨量路径（亮度→点密度）

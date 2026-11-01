@@ -1195,7 +1195,7 @@ export class Viewer {
       // 彩色点的明暗/层次由颜色本身表达：空气透视会把颜色洗成纸色，彩色路径关掉。
       this.pointUniforms.uFogAmount.value = 0;
       // 线稿已经在每点颜色里，深度描边只留一点点（否则 silhouette 一圈粗黑边抢戏）。
-      this.compositeUniforms.uEdgeStrength.value = p.edgeStrength * 0.18;
+      this.compositeUniforms.uEdgeStrength.value = p.edgeStrength * 0.05;
       // 彩色点要更"实"：点略放大盖住纸缝，颜色才不会被纸色稀释成粉彩。
       this.pointUniforms.uPointSize.value = p.pointSize * 1.35;
     }

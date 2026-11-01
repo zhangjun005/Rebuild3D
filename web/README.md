@@ -91,19 +91,23 @@ npm run gen:noise  # 重新生成 src/assets/blue-noise.png（一次就够，产
 | 参数 | 作用 |
 |---|---|
 | `colorMode` | 1 = 保留原色路径。点只带颜色；**点密度不再由亮度决定** |
-| `colorPosterize` | 色调分离级数（默认 5）——"像印刷品"的关键一步 |
-| `colorHalftone` | 屏幕空间网点叠加强度（默认 0.5，叠在颜色上，不参与点生成） |
+| `colorPosterize` | 色调分离级数（默认 **6**）——"像印刷品"的关键一步 |
+| `colorHalftone` | 屏幕空间网点叠加强度（默认 **0**：实测只加噪点、没加价值，想加质感再手动开） |
 
 实现（最小改动，没动管线结构）：
 - `applyParams` 里：彩色路径把 `uStipple` / `uMono` / `uFogAmount` 归零（前两个是旧单色路径的开关，
-  雾会把颜色洗成纸色），点略放大 ×1.35 盖住纸缝，深度描边强度降到 0.18（线稿已经在颜色里）。
+  雾会把颜色洗成纸色），点略放大 ×1.35 盖住纸缝，深度描边强度降到 ×0.05（线稿已经在颜色里）。
+- 纸色默认**纯白** `#ffffff`（暖纸色会吃掉饱和度）；彩色预设 `softness` 从 0.6 降到 **0.25**——
+  软边半透明的圆片会把颜色和纸混成粉彩，这是"发白"的最大单项原因（比点径/覆盖率的单项影响更大）。
 - **印刷质感全部在合成 pass 叠**（`post-edge.frag.glsl` 的 `printify()`）：
   色调分离 → 屏幕空间网点（暗部叠墨）→ 纸纹（低频纸色 + 高频颗粒）。
 - 单色墨量路径原样保留：`stipple-print` / `halftone-manga` / `engraving` / `ink-edge` 预设
   都显式 `colorMode: 0`，铜版画/半调照旧可用。
+- 点大小滑块在彩色路径下**有效**：滑块值 `p` 会以 `p × 1.35` 生效（为了盖住纸缝），
+  所以 stats 里的 `pointSize` 是滑块值，实际渲染直径是它的 1.35 倍。
 
-对比（`out/ab-base.ilcl`，20 万点，同机位）：`web/.shots/00-color-print-abc.png`
-A 单色铜版画（只剩轮廓）｜B 彩色点画｜C 彩色+强网点。
+对比（`out/ab-base.ilcl`，20 万点，同机位）：`web/.shots/00-color-print-abc.png`（A 单色/ B 彩色 / C 强网点）、
+`web/.shots/01-color-default-ab.png`（D 新默认 / E 小点径）。
 
 ## 图像模式（对照用，非产品路径）
 
