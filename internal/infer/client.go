@@ -247,3 +247,12 @@ func (c *Client) Close() error {
 		return <-done
 	}
 }
+
+// Kill 立即强杀子进程，不等待 UNLOAD/优雅退出。
+// 仅用于关闭超时兜底（例如推理卡住、管道阻塞）；正常路径请用 Close。
+func (c *Client) Kill() error {
+	if c == nil || c.cmd == nil || c.cmd.Process == nil {
+		return nil
+	}
+	return c.cmd.Process.Kill()
+}

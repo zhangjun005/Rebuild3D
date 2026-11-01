@@ -69,12 +69,18 @@ func (e *RemoteError) Error() string {
 // Is 让 errors.Is(err, ErrRemote) 成立。
 func (e *RemoteError) Is(target error) bool { return target == ErrRemote }
 
-// PingInfo 是 PING 响应的 JSON 体。
+// PingInfo 是 PING 响应的 JSON 体，字段对应 sidecar/depth_engine.py 的 status()。
 type PingInfo struct {
 	Model      string `json:"model"`
 	Device     string `json:"device"`
-	VRAMUsedMB int    `json:"vram_used_mb"`
 	Ready      bool   `json:"ready"`
+	ProcessRes int    `json:"process_res"`
+	// VRAMUsedMB / VRAMPeakMB 是 PyTorch 分配器口径的显存（MiB）。
+	VRAMUsedMB float64 `json:"vram_used_mb"`
+	VRAMPeakMB float64 `json:"vram_peak_mb"`
+	// LoadSeconds / LastInferSeconds 在从未加载/推理时为 null，故用指针。
+	LoadSeconds      *float64 `json:"load_seconds"`
+	LastInferSeconds *float64 `json:"last_infer_seconds"`
 }
 
 // DepthResult 是 INFER 响应的解码结果。

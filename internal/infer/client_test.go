@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"testing"
 	"time"
@@ -58,8 +59,17 @@ func TestPing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Ping: %v", err)
 	}
-	want := PingInfo{Model: "fake-da3", Device: "cpu", VRAMUsedMB: 1234, Ready: true}
-	if info != want {
+	loadSeconds := 0.1
+	want := PingInfo{
+		Model:       "fake-da3",
+		Device:      "cpu",
+		Ready:       true,
+		ProcessRes:  504,
+		VRAMUsedMB:  1234.5,
+		VRAMPeakMB:  2000,
+		LoadSeconds: &loadSeconds,
+	}
+	if !reflect.DeepEqual(info, want) {
 		t.Errorf("PingInfo = %+v，期望 %+v", info, want)
 	}
 }

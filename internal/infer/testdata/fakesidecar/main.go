@@ -1,14 +1,22 @@
 // 假 sidecar：按 docs/selection.md §4.1 的 stdio 帧协议与 Go 客户端对话，
-// 供 internal/infer 的端到端测试使用（真实 Python sidecar 尚未实现）。
+// 供 internal/infer 的端到端测试使用（不依赖 Python / GPU，纯 Go 程序）。
 //
 // 它由测试通过 `go build ./testdata/fakesidecar` 编译后作为子进程运行：
-// 从 stdin 读请求帧，只往 stdout 写响应帧；任何诊断信息都写 stderr。
+// 从 stdin 读请求帧，只往 stdout 写响应帧；诊断信息写 stderr。
 //
-// 行为由环境变量 FAKE_MODE 控制：
+// 行为由环境变量控制：
 //
-//	ok（默认）  正常应答
-//	infer-error PING/UNLOAD 正常，INFER 返回 status=1（模拟模型未加载）
-//	exit        启动后立刻退出（模拟 sidecar 崩溃）
+//	FAKE_MODE=ok（默认）  正常应答
+//	FAKE_MODE=warming    前 2 次 PING 返回 ready=false，第 3 次起 true（测预热轮询）
+//	FAKE_MODE=infer-error  PING/UNLOAD 正常，INFER 返回 status=1（模拟业务错误）
+//	FAKE_MODE=exit        启动后立刻退出（模拟 sidecar 崩溃）
+//	FAKE_MODE=crash-once  第一次 INFER 时进程直接退出（模拟推理中崩溃）；
+//	                      用 FAKE_CRASH_MARKER 文件记录"已经崩过一次"，
+//	                      重启后的进程看到 marker 即正常应答（测"重启一次并重试"）
+//
+//	FAKE_LOG=<path>         每个请求追加一行 "cmd=N arg=M"（测请求序列/UNLOAD 是否发出）
+//	FAKE_CRASH_MARKER=<path> crash-once 的持久化标记
+//	FAKE_INFER_DELAY_MS=<n> INFER 响应前 sleep n 毫秒（测"耗时可观测"，本机时钟粒度约 0.5ms）
 //
 // INFER 的约定：固定返回 5x3；arg==0 时带 conf（flags=1），arg!=0 时不带（flags=0）。
 // depth[i] = i*0.25 - 1；conf[i] = (i+1)/15，方便测试断言具体数值。
@@ -21,6 +29,8 @@ import (
 	"io"
 	"math"
 	"os"
+	"strconv"
+	"time"
 )
 
 const (
@@ -45,6 +55,7 @@ func main() {
 	out := bufio.NewWriter(os.Stdout)
 	defer func() { _ = out.Flush() }()
 
+	pingCount := 0
 	for {
 		var hdr [4]byte
 		if _, err := io.ReadFull(in, hdr[:]); err != nil {
@@ -63,14 +74,27 @@ func main() {
 		}
 		cmd := buf[0]
 		arg := binary.LittleEndian.Uint32(buf[1:5])
+		appendLog(fmt.Sprintf("cmd=%d arg=%d", cmd, arg))
 
 		switch cmd {
 		case cmdPing:
-			respond(out, statusOK, []byte(`{"model":"fake-da3","device":"cpu","vram_used_mb":1234,"ready":true}`))
+			pingCount++
+			ready := true
+			if mode == "warming" && pingCount < 3 {
+				ready = false
+			}
+			respond(out, statusOK, pingJSON(ready))
 		case cmdInfer:
 			if mode == "infer-error" {
 				respond(out, statusError, []byte("fake sidecar: 模型未加载（测试用错误）"))
 				continue
+			}
+			if mode == "crash-once" && crashFirstTime() {
+				// 不写响应，直接退出：Go 侧应看到管道 EOF 并重启进程。
+				os.Exit(1)
+			}
+			if d := inferDelay(); d > 0 {
+				time.Sleep(d)
 			}
 			respond(out, statusOK, inferPayload(arg))
 		case cmdUnload:
@@ -79,6 +103,52 @@ func main() {
 			respond(out, statusError, []byte(fmt.Sprintf("未知命令 %d", cmd)))
 		}
 	}
+}
+
+// crashFirstTime 在第一次崩溃时返回 true，并把 marker 落盘；
+// 重启后的进程看到 marker 返回 false（正常应答），从而能测"重启后重试成功"。
+func crashFirstTime() bool {
+	marker := os.Getenv("FAKE_CRASH_MARKER")
+	if marker == "" {
+		return true // 没配 marker：每次都崩（会触发重启上限）
+	}
+	if _, err := os.Stat(marker); err == nil {
+		return false
+	}
+	_ = os.WriteFile(marker, []byte("crashed"), 0o644)
+	return true
+}
+
+// pingJSON 构造与 sidecar/depth_engine.py status() 同构的 PING 响应。
+func pingJSON(ready bool) []byte {
+	return []byte(fmt.Sprintf(
+		`{"model":"fake-da3","device":"cpu","ready":%t,"process_res":504,`+
+			`"vram_used_mb":1234.5,"vram_peak_mb":2000.0,"load_seconds":0.1,"last_infer_seconds":null}`,
+		ready))
+}
+
+// inferDelay 返回 INFER 的人为延迟（模拟真实推理耗时）。
+func inferDelay() time.Duration {
+	v := os.Getenv("FAKE_INFER_DELAY_MS")
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return time.Duration(n) * time.Millisecond
+}
+
+// appendLog 把请求记录到 FAKE_LOG（未设置则无操作）。
+func appendLog(line string) {
+	path := os.Getenv("FAKE_LOG")
+	if path == "" {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	defer func() { _ = f.Close() }()
+	_, _ = fmt.Fprintln(f, line)
 }
 
 // inferPayload 构造 INFER 响应体：width u32 + height u32 + flags u32 + depth [+ conf]。
