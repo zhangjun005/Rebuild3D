@@ -14,7 +14,8 @@ import noiseUrl from './assets/blue-noise.png?url';
 import { fetchHealth, inferIllustration, waitForSidecar } from './infer';
 import { loadSampleCloud, parseIlcl } from './ilcl';
 import { Panel, type ExportRequest, type PngSizeKey } from './panel';
-import { DEFAULT_PRESET } from './params';
+import { DEFAULT_PRESET, GEN_DEFAULTS } from './params';
+import type { GenParams } from './params';
 import { configureBlueNoiseTexture, Viewer } from './viewer';
 
 function requireElement<T extends HTMLElement>(id: string): T {
@@ -103,6 +104,9 @@ async function boot(): Promise<void> {
   // 2) Viewer（渲染管线）
   const viewer = new Viewer(canvas, noise);
 
+  // 点云生成参数（不是渲染参数：改完要点「重新生成」才重新请求 /api/infer）
+  const genParams: GenParams = { ...GEN_DEFAULTS };
+
   // URL 开关：?baseView=threeQuarter / ?baseView=3q 用 3/4 基准视角（看 fixture 的立体感）
   // 默认是**正面**基准：深度图反投影的点云 +Z 朝观察者，作品本来的样子就是正面。
   const query = new URLSearchParams(window.location.search);
@@ -151,6 +155,7 @@ async function boot(): Promise<void> {
     onUpload: (file) => {
       lastFile = file;
       cloudForFile = null;
+      panel.setGenEnabled(true);
       // 产品路径：上传直接走点云（图像模式只是可选/回退，不再是默认）
       void generateCloud();
     },
@@ -160,6 +165,10 @@ async function boot(): Promise<void> {
     onReset: () => {
       viewer.resetView();
       panel.sync();
+    },
+    genParams,
+    onGenerate: () => {
+      void regenerateCloud();
     },
   });
   viewer.onStats = (stats) => panel.updateStats(stats);
@@ -305,6 +314,65 @@ async function boot(): Promise<void> {
   }
 
 
+
+  /** 统一把「生成参数」塞进推理请求 */
+  function genInferOptions(file: File, phaseText: string): Parameters<typeof inferIllustration>[1] {
+    void file;
+    return {
+      focalFactor: genParams.focalFactor,
+      maxPoints: genParams.maxPoints,
+      edgeThresh: genParams.edgeThresh,
+      sampleMode: genParams.sampleMode,
+      workRes: genParams.workRes,
+      onPhase: (phase) => panel.setInputStatus(`${phaseText}（${phase}）`),
+    };
+  }
+
+  /** 点数不足时说明原因（小图 workRes 被夹在 512 → 候选网格不够） */
+  function pointShortfallNote(requested: number, actual: number): string {
+    if (actual >= requested * 0.99) return '';
+    return `\n（原图较小：work_res 自动下限 512 → 候选网格不足以采样 ${requested.toLocaleString('en-US')} 点，实际 ${actual.toLocaleString('en-US')} 点）`;
+  }
+
+  /** 「重新生成点云」：用当前生成参数重新请求 /api/infer，保留旋转角度 */
+  async function regenerateCloud(): Promise<void> {
+    const file = lastFile;
+    if (!file) {
+      panel.setInputStatus('先上传插画，才能重新生成点云');
+      return;
+    }
+    if (busy) return;
+    busy = true;
+    panel.setGenBusy(true);
+    panel.setInputBusy(true);
+    try {
+      panel.setInputStatus(
+        `重新推理中…（焦距 ${genParams.focalFactor.toFixed(2)} · 最多 ${genParams.maxPoints.toLocaleString('en-US')} 点）`,
+      );
+      const result = await inferIllustration(file, genInferOptions(file, '重新推理中…'));
+      panel.setInputStatus(`生成点云…（${result.metrics.pointCount.toLocaleString('en-US')} 点）`);
+      viewer.setCloud(result.cloud, `${file.name} · ${result.metrics.pointCount.toLocaleString('en-US')} 点`, {
+        preserveOrientation: true,
+      });
+      panel.setSource(`${file.name} · ${result.metrics.pointCount.toLocaleString('en-US')} 点`);
+      panel.sync();
+      viewer.params.renderMode = 'cloud';
+      cloudForFile = file;
+      const m = result.metrics;
+      lastCloudMetrics = { ...m, bytes: result.buffer.byteLength };
+      panel.setInputStatus(cloudReadyStatus() + pointShortfallNote(genParams.maxPoints, m.pointCount));
+      panel.markGenApplied();
+      console.info('[illust3d] 重新生成完成', m);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[illust3d] 重新生成失败', error);
+      panel.setInputStatus(`重新生成失败：${message}`);
+    } finally {
+      busy = false;
+      panel.setGenBusy(false);
+      panel.setInputBusy(false);
+    }
+  }
   async function generateCloud(): Promise<void> {
     const file = lastFile;
     if (!file) {
@@ -422,6 +490,7 @@ async function boot(): Promise<void> {
     if (file) {
       lastFile = file;
       cloudForFile = null;
+      panel.setGenEnabled(true);
       void generateCloud();
     }
   });

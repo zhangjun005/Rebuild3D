@@ -62,6 +62,10 @@ export interface InferOptions {
   voxelSize?: number;
   /** 边缘阈值；0 = 自动（p99 深度差） */
   edgeThresh?: number;
+  /** 采样模式：structure（默认，跟随图像结构）/ depthpixel（对照基线） */
+  sampleMode?: 'structure' | 'depthpixel';
+  /** 工作分辨率；0 = 自动（clamp(原图长边/2, 512, 2048)） */
+  workRes?: number;
   signal?: AbortSignal;
   /** 阶段回调（给 UI 显示"模型加载中/推理中"） */
   onPhase?: (phase: string) => void;
@@ -97,6 +101,8 @@ export async function inferIllustration(file: File, options: InferOptions = {}):
   if (options.maxPoints !== undefined) form.append('max_points', String(options.maxPoints));
   if (options.voxelSize !== undefined) form.append('voxel_size', String(options.voxelSize));
   if (options.edgeThresh !== undefined) form.append('edge_thresh', String(options.edgeThresh));
+  if (options.sampleMode) form.append('sample_mode', options.sampleMode);
+  if (options.workRes !== undefined) form.append('work_res', String(options.workRes));
 
   options.onPhase?.('推理中（首帧可能要等模型预热）');
   const response = await fetch('/api/infer', {

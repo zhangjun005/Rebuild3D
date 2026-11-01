@@ -369,3 +369,32 @@ export const DEFAULT_PRESET: PresetKey = 'color-print';
 export function cloneParams(params: RenderParams): RenderParams {
   return { ...params };
 }
+
+// ── 点云生成参数（不是渲染参数！改这些要重新请求 /api/infer）──────────────
+export interface GenParams {
+  /** 焦距系数：fx = fy = focalFactor · max(W,H)。小 = 广角（点云更厚），大 = 长焦（更薄） */
+  focalFactor: number;
+  /** 点数档位（Go 侧硬上限 5,000,000；受 work_res 候选网格限制） */
+  maxPoints: number;
+  /** 深度边缘剔除阈值；0 = 自动（p99） */
+  edgeThresh: number;
+  /** 采样模式：structure（跟随图像结构）/ depthpixel（对照基线） */
+  sampleMode: 'structure' | 'depthpixel';
+  /** 工作分辨率；0 = 自动（clamp(原图长边/2, 512, 2048)） */
+  workRes: number;
+}
+
+export const GEN_DEFAULTS: GenParams = {
+  focalFactor: 1,
+  maxPoints: 400000,
+  edgeThresh: 0,
+  sampleMode: 'structure',
+  workRes: 0,
+};
+
+/** 点数档位（按钮） */
+export const MAX_POINT_TIERS: ReadonlyArray<{ value: number; label: string }> = [
+  { value: 400000, label: '40 万' },
+  { value: 1000000, label: '100 万' },
+  { value: 2000000, label: '200 万' },
+];

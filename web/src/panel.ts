@@ -8,6 +8,8 @@
 import type { NumericParamKey, PresetKey, RenderParams } from './params';
 import { PRESETS, PRESET_KEYS } from './params';
 import type { ViewerStats } from './viewer';
+import type { GenParams } from './params';
+import { GenSection } from './gen-section';
 
 /** PNG 导出的尺寸选项（只出图片，不做 GIF/视频） */
 export type PngSizeKey = 'viewport' | 'square' | '1080p';
@@ -49,13 +51,13 @@ const SLIDERS: readonly SliderDef[] = [
   { key: 'density', label: '点数密度', min: 0.05, max: 1, step: 0.01, digits: 2, visibleWhen: (p) => p.renderMode === 'cloud' },
   { key: 'stippleScale', label: '点画尺度 px', min: 1.5, max: 10, step: 0.1, digits: 1, visibleWhen: (p) => p.renderMode === 'image' && p.halftone <= 0.001 && p.engraving <= 0.001 },
   { key: 'inkGain', label: '结构增益', min: 1, max: 24, step: 0.5, digits: 1, visibleWhen: (p) => p.colorMode < 0.5 && p.inkSource === 1 },
-  { key: 'stipple', label: '点画强度', min: 0, max: 1, step: 0.01, digits: 2, visibleWhen: (p) => p.halftone <= 0.001 && p.engraving <= 0.001 },
-  { key: 'densityGamma', label: '明暗曲线', min: 0.4, max: 2.5, step: 0.05, digits: 2 },
+  { key: 'stipple', label: '点画强度', min: 0, max: 1, step: 0.01, digits: 2, visibleWhen: (p) => p.colorMode < 0.5 && p.halftone <= 0.001 && p.engraving <= 0.001 },
+  { key: 'densityGamma', label: '明暗曲线', min: 0.4, max: 2.5, step: 0.05, digits: 2, visibleWhen: (p) => p.colorMode < 0.5 },
   { key: 'edgeStrength', label: '描边强度', min: 0, max: 2, step: 0.05, digits: 2 },
   { key: 'edgeThreshold', label: '描边阈值', min: 0.02, max: 0.6, step: 0.01, digits: 2 },
   { key: 'edgeWidth', label: '描边宽度', min: 0.5, max: 4, step: 0.1, digits: 1 },
-  { key: 'fogAmount', label: '空气透视', min: 0, max: 1, step: 0.01, digits: 2, visibleWhen: (p) => p.renderMode === 'cloud' },
-  { key: 'mono', label: '单色墨点', min: 0, max: 1, step: 0.01, digits: 2 },
+  { key: 'fogAmount', label: '空气透视', min: 0, max: 1, step: 0.01, digits: 2, visibleWhen: (p) => p.renderMode === 'cloud' && p.colorMode < 0.5 },
+  { key: 'mono', label: '单色墨点', min: 0, max: 1, step: 0.01, digits: 2, visibleWhen: (p) => p.colorMode < 0.5 },
   { key: 'grain', label: '纸颗粒', min: 0, max: 0.3, step: 0.005, digits: 3 },
   { key: 'vignette', label: '暗角', min: 0, max: 1, step: 0.01, digits: 2 },
   { key: 'swayAmplitude', label: '摆动幅度 ±°', min: 0, max: 45, step: 1, digits: 0, visibleWhen: (p) => !p.parallaxMode && p.renderMode === 'cloud' },
@@ -110,6 +112,10 @@ export interface PanelOptions {
   onLoadSample: () => void;
   /** 回正：相机恢复基准位姿 */
   onReset: () => void;
+  /** 点云生成参数（不是渲染参数；改动需重新请求 /api/infer） */
+  genParams: GenParams;
+  /** 点「重新生成点云」 */
+  onGenerate: () => void;
 }
 
 export class Panel {
@@ -117,6 +123,8 @@ export class Panel {
   private readonly onChange: () => void;
   private readonly onExport: (request: ExportRequest) => void;
   private readonly onResetAction: () => void;
+  /** 点云生成参数分组 */
+  private readonly genSection: GenSection;
   private readonly syncers: Array<() => void> = [];
   private readonly hud: HTMLElement;
   private readonly container: HTMLElement;
@@ -189,6 +197,7 @@ export class Panel {
     });
     scrollArea.append(modeRow);
 
+
     // ── 预设 ──
     const presets = document.createElement('div');
     presets.className = 'presets';
@@ -206,6 +215,14 @@ export class Panel {
     }
     scrollArea.append(presets);
     this.setActivePreset(options.activePreset);
+
+    // ── 点云生成参数（焦距/点数档位/边缘阈值 + 重新生成）──
+
+    this.genSection = new GenSection({
+      params: options.genParams,
+      onGenerate: options.onGenerate,
+    });
+    scrollArea.append(this.genSection.element());
 
 
     // ── 墨量映射（第二层：这幅画该怎么读；两种模式共用）──
@@ -567,6 +584,21 @@ export class Panel {
   }
 
   /** 图像模式（对照）的来源：上传的文件名（不含点数，避免 HUD 自相矛盾） */
+  /** 生成参数分组：启用/禁用（上传后才能生成） */
+  setGenEnabled(hasFile: boolean): void {
+    this.genSection.setEnabled(hasFile);
+  }
+
+  /** 生成成功：按钮回到「重新生成」 */
+  markGenApplied(): void {
+    this.genSection.markApplied();
+  }
+
+  /** 生成中：禁用生成按钮 */
+  setGenBusy(busy: boolean): void {
+    this.genSection.setBusy(busy);
+  }
+
   setImageSource(label: string): void {
     this.imageSourceLabel = label;
     this.renderHud();
