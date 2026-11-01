@@ -150,8 +150,8 @@ func TestBuildAutoDownsample(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if res.PointCount > 1000 || res.PointCount == 0 {
-		t.Errorf("点数 = %d，期望 (0, 1000]", res.PointCount)
+	if res.PointCount > 1000 || res.PointCount < 500 {
+		t.Errorf("点数 = %d，期望落在 [500, 1000]（自动体素应接近但不超过上限）", res.PointCount)
 	}
 	if res.VoxelSize <= 0 {
 		t.Errorf("自动下采样应报告体素边长，实际 %v", res.VoxelSize)
@@ -162,6 +162,30 @@ func TestBuildAutoDownsample(t *testing.T) {
 	c := decodeResult(t, res)
 	if len(c.Pos) != res.PointCount {
 		t.Errorf("ILC1 点数 %d != PointCount %d", len(c.Pos), res.PointCount)
+	}
+}
+
+// TestBuildAutoDownsampleWithOutliers 是回归测试：深度图里的少量飞点会把包围盒撑大，
+// 旧实现（按包围盒最长边猜初始体素）会在这种输入上把点云压到几百点甚至个位数。
+func TestBuildAutoDownsampleWithOutliers(t *testing.T) {
+	const w, h = 200, 200
+	depth := make([]float32, w*h)
+	for i := range depth {
+		depth[i] = 1 + float32(i%17)*0.01
+	}
+	// 两个极端深度点：会显著撑大点云包围盒。
+	depth[0] = 50
+	depth[w*h-1] = 40
+
+	res, err := Build(depth, w, h, uniformImage(w, h, color.RGBA{}), Params{MaxPoints: 20000, EdgeThresh: 100})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if res.PointCount < 5000 || res.PointCount > 20000 {
+		t.Errorf("点数 = %d，期望落在 [5000, 20000]（不能被飞点撑大的 bbox 带偏）", res.PointCount)
+	}
+	if res.VoxelSize <= 0 {
+		t.Errorf("应报告自动体素边长，实际 %v", res.VoxelSize)
 	}
 }
 

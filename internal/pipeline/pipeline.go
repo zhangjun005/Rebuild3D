@@ -158,16 +158,21 @@ func Build(depth []float32, w, h int, img image.Image, params Params) (*Result, 
 	}
 
 	// 4) 点数控制：显式 voxel_size 优先，否则超过 max_points 时自动推。
+	// 自动体素的初值用源像素间距（中位深度 / focal），对飞点与包围盒离群值稳健。
+	spacingHint := 0.0
+	if focal > 0 {
+		spacingHint = medianZ(kept, 8192) / focal
+	}
 	voxel := p.VoxelSize
 	switch {
 	case voxel > 0:
 		kept, cols = geometry.VoxelDownsample(kept, cols, voxel)
 		if len(kept) > p.MaxPoints {
 			// 用户给的体素太细：仍然尊重 max_points 上限。
-			kept, cols, voxel = autoDownsample(kept, cols, p.MaxPoints)
+			kept, cols, voxel = autoDownsample(kept, cols, p.MaxPoints, spacingHint)
 		}
 	case len(kept) > p.MaxPoints:
-		kept, cols, voxel = autoDownsample(kept, cols, p.MaxPoints)
+		kept, cols, voxel = autoDownsample(kept, cols, p.MaxPoints, spacingHint)
 	}
 	if len(kept) == 0 {
 		return nil, ErrNoPoints
@@ -229,37 +234,142 @@ func autoEdgeThresh(depth []float32, w, h int) float32 {
 	return t
 }
 
-// autoDownsample 迭代推出体素边长，使点数不超过 maxPoints。
-// 初始体素取包围盒最长边的 1/1000（偏小），再用"点数 ~ 1/v²"（表面点云）迭代放大；
-// 体积点云下会略微过冲（点更稀），可接受，因为 max_points 是上限而不是目标值。
-func autoDownsample(pts []geometry.Vec3, cols []geometry.Color, maxPoints int) ([]geometry.Vec3, []geometry.Color, float32) {
-	minB, maxB := bbox(pts)
-	ex := float64(maxB.X - minB.X)
-	ey := float64(maxB.Y - minB.Y)
-	ez := float64(maxB.Z - minB.Z)
-	maxExt := math.Max(ex, math.Max(ey, ez))
-	if !(maxExt > 0) || math.IsInf(maxExt, 0) || math.IsNaN(maxExt) {
-		maxExt = 1
+// autoDownsample 推出体素边长，使点数不超过 maxPoints（即自动 voxel_size 的实现）。
+//
+// 关键教训：初始值不能凭"包围盒最长边/1000"瞎猜。深度图里的少量飞点会把包围盒撑大，
+// 而那个初值又远小于真实点间距，迭代迟迟收敛不了（实测曾把 24.7 万点压成 4 点）。
+// 这里改用**源数据自身的像素间距**来估：
+//
+//	相邻深度像素在世界空间的间距 ≈ 中位深度 / focal
+//	表面点云占格数 ≈ 点数 * (间距/体素)²
+//	→ 体素 ≈ 间距 * sqrt(点数/上限)
+//
+// spacingHint 由 Build 用中位深度算出（对飞点稳健）；之后按 sqrt(点数/上限) 迭代修正，
+// 正常 1~2 轮就能命中，最多 8 轮。
+func autoDownsample(pts []geometry.Vec3, cols []geometry.Color, maxPoints int, spacingHint float64) ([]geometry.Vec3, []geometry.Color, float32) {
+	if len(pts) == 0 {
+		return nil, nil, 0
 	}
-	v := maxExt / 1000 // 初始体素：足够细，保证第一轮点数接近原始点数
-	for iter := 0; iter < 10; iter++ {
+	v := initialVoxelSize(pts, maxPoints, spacingHint)
+	for iter := 0; iter < 8; iter++ {
 		dp, dc := geometry.VoxelDownsample(pts, cols, float32(v))
-		if len(dp) == 0 {
-			return dp, dc, float32(v)
-		}
 		if len(dp) <= maxPoints {
 			return dp, dc, float32(v)
 		}
-		ratio := float64(len(dp)) / float64(maxPoints)
-		v *= math.Sqrt(ratio) // 表面点云：点数 ≈ 面积 / v²
-		if v > 4*maxExt {
-			v = 4 * maxExt
+		v *= math.Sqrt(float64(len(dp)) / float64(maxPoints))
+		if !(v > 0) || math.IsNaN(v) || math.IsInf(v, 0) {
+			break
 		}
 	}
-	// 兜底：4×包围盒最长边 → 至多 8 个格子，必不超上限。
-	v = 4 * maxExt
-	dp, dc := geometry.VoxelDownsample(pts, cols, float32(v))
+	// 兜底（理论上到不了）：等步长抽样，保证点数不超上限、也不会塌成个位数。
+	dp, dc := strideSample(pts, cols, maxPoints)
 	return dp, dc, float32(v)
+}
+
+// initialVoxelSize 给出自动体素的初值：优先用源像素间距（spacingHint），
+// 没有线索时退化为"稳健包围盒面积 / 上限"。
+func initialVoxelSize(pts []geometry.Vec3, maxPoints int, spacingHint float64) float64 {
+	n := len(pts)
+	factor := 1.0
+	if maxPoints > 0 && n > maxPoints {
+		factor = math.Sqrt(float64(n) / float64(maxPoints))
+	}
+	if spacingHint > 0 && !math.IsNaN(spacingHint) && !math.IsInf(spacingHint, 0) {
+		return spacingHint * factor
+	}
+
+	// 无 hint：用分位数包围盒（p1/p99）估表面积，避免飞点撑大 bbox。
+	minB, maxB := robustBBox(pts, 0.01, 0.99)
+	ext := [3]float64{
+		float64(maxB.X - minB.X),
+		float64(maxB.Y - minB.Y),
+		float64(maxB.Z - minB.Z),
+	}
+	sort.Float64s(ext[:])
+	area := ext[1] * ext[2] // 最大的两个边长 → 表面积近似（表面点云）
+	if area > 0 && maxPoints > 0 {
+		if v := math.Sqrt(area / float64(maxPoints)); v > 0 && !math.IsInf(v, 0) && !math.IsNaN(v) {
+			return v
+		}
+	}
+	return 1 // 极端兜底：单位体素（调用方最多再迭代修正）
+}
+
+// medianZ 用采样近似中位深度（ILC1 里 z 就是深度）。
+func medianZ(pts []geometry.Vec3, maxSamples int) float64 {
+	if len(pts) == 0 {
+		return 0
+	}
+	step := 1
+	if maxSamples > 0 && len(pts) > maxSamples {
+		step = len(pts) / maxSamples
+	}
+	vals := make([]float32, 0, len(pts)/step+1)
+	for i := 0; i < len(pts); i += step {
+		vals = append(vals, pts[i].Z)
+	}
+	sort.Slice(vals, func(i, j int) bool { return vals[i] < vals[j] })
+	mid := len(vals) / 2
+	if len(vals)%2 == 0 && mid > 0 {
+		return float64(vals[mid-1]+vals[mid]) / 2
+	}
+	return float64(vals[mid])
+}
+
+// robustBBox 用分位数（lo/hi，如 0.01/0.99）估计包围盒，抽稀采样以控制开销。
+func robustBBox(pts []geometry.Vec3, lo, hi float64) (geometry.Vec3, geometry.Vec3) {
+	const maxSamples = 8192
+	if len(pts) == 0 {
+		return geometry.Vec3{}, geometry.Vec3{}
+	}
+	step := 1
+	if len(pts) > maxSamples {
+		step = len(pts) / maxSamples
+	}
+	xs := make([]float32, 0, len(pts)/step+1)
+	ys := make([]float32, 0, len(pts)/step+1)
+	zs := make([]float32, 0, len(pts)/step+1)
+	for i := 0; i < len(pts); i += step {
+		p := pts[i]
+		xs = append(xs, p.X)
+		ys = append(ys, p.Y)
+		zs = append(zs, p.Z)
+	}
+	sort.Slice(xs, func(i, j int) bool { return xs[i] < xs[j] })
+	sort.Slice(ys, func(i, j int) bool { return ys[i] < ys[j] })
+	sort.Slice(zs, func(i, j int) bool { return zs[i] < zs[j] })
+	at := func(s []float32, q float64) float32 {
+		i := int(float64(len(s)-1) * q)
+		if i < 0 {
+			i = 0
+		}
+		if i >= len(s) {
+			i = len(s) - 1
+		}
+		return s[i]
+	}
+	return geometry.Vec3{X: at(xs, lo), Y: at(ys, lo), Z: at(zs, lo)},
+		geometry.Vec3{X: at(xs, hi), Y: at(ys, hi), Z: at(zs, hi)}
+}
+
+// strideSample 是最后的保底抽样（只用在下采样迭代都不收敛的极端情况）。
+func strideSample(pts []geometry.Vec3, cols []geometry.Color, maxPoints int) ([]geometry.Vec3, []geometry.Color) {
+	if maxPoints <= 0 || len(pts) <= maxPoints {
+		return pts, cols
+	}
+	step := float64(len(pts)) / float64(maxPoints)
+	outPts := make([]geometry.Vec3, 0, maxPoints)
+	outCols := make([]geometry.Color, 0, maxPoints)
+	for k := 0; k < maxPoints; k++ {
+		i := int(float64(k) * step)
+		outPts = append(outPts, pts[i])
+		if i < len(cols) {
+			outCols = append(outCols, cols[i])
+		} else {
+			outCols = append(outCols, geometry.Color{})
+		}
+	}
+	return outPts, outCols
 }
 
 // sampleColor 把深度图像素 (x,y) 映射到原图并取最近邻颜色。
