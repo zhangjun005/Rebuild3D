@@ -44,6 +44,7 @@ testdata/illustrations/
 
 # ── kron 运行时锁 ──
 .kron/.lock/
+.kron/.trash/
 
 # ── 旧工程（仅作参考，完整工程已丢失）──
 # 保留在磁盘上，但不进版本库：那是别人的 vendored 代码，不是本项目的源码。
