@@ -126,6 +126,7 @@ $ps1 = @"
 `$env:TMPDIR                 = '$CacheTmp'
 `$env:HF_HOME                = '$HfHome'
 `$env:HF_ENDPOINT            = 'https://hf-mirror.com'
+`$env:HF_HUB_DISABLE_XET     = '1'
 `$env:TORCH_HOME             = '$TorchHome'
 "@
 $bat = @"
@@ -138,6 +139,7 @@ set "TEMP=$CacheTmp"
 set "TMPDIR=$CacheTmp"
 set "HF_HOME=$HfHome"
 set "HF_ENDPOINT=https://hf-mirror.com"
+set "HF_HUB_DISABLE_XET=1"
 set "TORCH_HOME=$TorchHome"
 "@
 Set-Content -Path (Join-Path $ActivateDir 'env_vars.ps1') -Value $ps1 -Encoding utf8
@@ -265,7 +267,11 @@ Ok '写 sidecar/vendor/PATCHES.md'
 # ── 6. 可选：下载模型 ─────────────────────────────────────────────────────
 if ($DownloadModel) {
     Step "下载模型 $DownloadModel -> $HfHome"
-    & $EnvPy -c "from huggingface_hub import snapshot_download; snapshot_download('$DownloadModel')"
+    # 关掉 xet：hf-mirror 会把请求重定向到 xet-bridge CDN（us.aws.cdn.hf.co），
+    # 实测 hf-xet 通道会卡死在 128 MB 不动；走普通 HTTP 稳定（实测 ~1.6 MB/s）。
+    $env:HF_HUB_DISABLE_XET = '1'
+    $env:HF_HUB_ENABLE_HF_TRANSFER = '0'
+    & $EnvPy -c "from huggingface_hub import snapshot_download; p = snapshot_download('$DownloadModel'); print('  ->', p)"
     if ($LASTEXITCODE -ne 0) { throw '模型下载失败' }
     Ok '模型下载完成'
 }
