@@ -26,9 +26,14 @@ export interface IlcCloud {
   };
 }
 
-const MAGIC = 'ILC1';
-const HEADER_BYTES = 8;
-const BYTES_PER_POINT = 12 + 3;
+/** ILC1 头部常量（infer.ts 的响应校验也用它，避免两处各写一份） */
+export const ILC1_MAGIC = 'ILC1';
+export const ILC1_HEADER_BYTES = 8;
+export const ILC1_BYTES_PER_POINT = 12 + 3;
+
+const MAGIC = ILC1_MAGIC;
+const HEADER_BYTES = ILC1_HEADER_BYTES;
+const BYTES_PER_POINT = ILC1_BYTES_PER_POINT;
 
 /** 解析 ILC1 字节流（不复制数据） */
 export function parseIlcl(buffer: ArrayBuffer): IlcCloud {

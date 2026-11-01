@@ -364,7 +364,7 @@ async function boot(): Promise<void> {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error('[illust3d] 重新生成失败', error);
-      panel.setInputStatus(`重新生成失败：${message}`);
+      panel.setInputStatus(`重新生成失败：${message}\n已保留原来显示的点云 —— 可直接重试`);
     } finally {
       busy = false;
       panel.setGenBusy(false);
@@ -433,10 +433,15 @@ async function boot(): Promise<void> {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.error('[illust3d] 点云生成失败', error);
-      panel.setInputStatus(
-        `点云生成失败：${message}\n已自动切到「图像模式」——可直接看画面，修好后切回「点云」重试`,
-      );
-      if (file) await useImageMode(file);
+      if (cloudForFile || lastCloudMetrics) {
+        // 已经有点云在显示：保留它，别把用户正在看的东西清掉
+        panel.setInputStatus(`点云生成失败：${message}\n已保留原来显示的点云 —— 可直接重试`);
+      } else {
+        panel.setInputStatus(
+          `点云生成失败：${message}\n已自动切到「图像模式」——可直接看画面，修好后切回「点云」重试`,
+        );
+        if (file) await useImageMode(file);
+      }
     } finally {
       busy = false;
       panel.setInputBusy(false);

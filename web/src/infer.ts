@@ -16,7 +16,13 @@
  * （不用管 CORS）。
  */
 
-import { parseIlcl, type IlcCloud } from './ilcl';
+import {
+  ILC1_BYTES_PER_POINT,
+  ILC1_HEADER_BYTES,
+  ILC1_MAGIC,
+  parseIlcl,
+  type IlcCloud,
+} from './ilcl';
 
 export interface SidecarStatus {
   ready: boolean;
@@ -124,6 +130,32 @@ export async function inferIllustration(file: File, options: InferOptions = {}):
   }
 
   const buffer = await response.arrayBuffer();
+
+  // ── 响应完整性校验 ──────────────────────────────────────────────────────
+  // 服务端曾经出现过：请求被中断后 Go 提前放弃读 sidecar 响应，剩余字节留在管道里，
+  // 下一个请求把它们当成长度前缀 → 返回 HTTP 200 但响应体是空的/垃圾（静默失败）。
+  // 下面四条把"静默拿到坏数据"变成明确报错；服务端修好后仍作为保险层。
+  const byteLength = buffer.byteLength;
+  if (byteLength === 0) {
+    throw new Error(
+      '服务端返回 0 字节（HTTP 200 但响应体为空）——sidecar 可能正在重启或管道失步，请重试一次',
+    );
+  }
+  if (byteLength < ILC1_HEADER_BYTES) {
+    throw new Error(`响应不完整（${byteLength} 字节，连 ILC1 头都不足 ${ILC1_HEADER_BYTES} 字节）`);
+  }
+  const magic = String.fromCharCode(...new Uint8Array(buffer, 0, 4));
+  if (magic !== ILC1_MAGIC) {
+    throw new Error(`响应格式错误（magic="${magic}"，期望 "${ILC1_MAGIC}"）——服务端管道可能已失步`);
+  }
+  const declaredCount = new DataView(buffer).getUint32(4, true);
+  const expectedBytes = ILC1_HEADER_BYTES + declaredCount * ILC1_BYTES_PER_POINT;
+  if (expectedBytes !== byteLength) {
+    throw new Error(
+      `ILC1 长度不一致：声明 ${declaredCount.toLocaleString('en-US')} 点（应为 ${expectedBytes.toLocaleString('en-US')} 字节），实际 ${byteLength.toLocaleString('en-US')} 字节——响应被截断或失步`,
+    );
+  }
+
   const cloud = parseIlcl(buffer);
   const metrics: InferMetrics = {
     pointCount: headerNumber(response.headers, 'X-ILC1-PointCount') || cloud.count,
