@@ -30,7 +30,7 @@ import (
 //	edge_weight   结构模式的边缘权重 kEdge（w = 1 + kEdge*Gn + kInk*Ink），默认 6；0 = 关闭
 //	ink_weight    结构模式的墨量权重 kInk（相对暗度通道），默认 4；0 = 关闭
 //	work_res      结构采样工作分辨率长边，0 = 自动（原图长边/2，夹 512..2048）
-//	max_points    点数上限，默认 200000（与 work_res 解耦）
+//	max_points    点数上限，默认 400000（与 work_res 解耦）
 //	voxel_size    体素边长，默认 0（structure 模式默认不做体素下采样）
 //	edge_thresh   边缘阈值，0 = 按深度分位数自动
 //

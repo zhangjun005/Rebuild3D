@@ -39,8 +39,11 @@ const (
 const (
 	// DefaultFocalFactor 是默认焦距系数（fx = fy = factor * max(W,H)）。
 	DefaultFocalFactor = 1.0
-	// DefaultMaxPoints 是默认点数上限（渲染 60fps 的经验范围，见 docs/selection.md §6）。
-	DefaultMaxPoints = 200000
+	// DefaultMaxPoints 是默认点数上限（= 40 万）。
+	// 实测（平涂 4000px 图，点径 3 / softness 0.25）：20 万点纸色从缝隙透出、背景斑驳；
+	// 40 万点背景饱和均匀且线仍锐；60 万点画面几乎无差别但 ILC1 从 5.9MB 涨到 8.8MB。
+	// 几何耗时几乎不随点数增长（成本在 4M 候选网格的权重计算），所以 40 万是近乎免费的覆盖率收益。
+	DefaultMaxPoints = 400000
 	// MinMaxPoints 是允许的最小点数上限（低于此值点云基本不可读）。
 	MinMaxPoints = 1000
 	// MaxMaxPoints 是允许的最大点数上限（浏览器侧的硬上限）。
@@ -82,7 +85,7 @@ type Params struct {
 	// FocalFactor 是焦距系数：fx = fy = FocalFactor * max(depthW, depthH)。0 表示用默认 1.0。
 	// 小 -> 广角、点云"厚"；大 -> 长焦、接近浮雕层叠。
 	FocalFactor float64
-	// MaxPoints 是点数上限。0 表示用默认 200000。
+	// MaxPoints 是点数上限。0 表示用默认 400000。
 	MaxPoints int
 	// VoxelSize 是体素下采样边长；0 表示自动（按包围盒与 MaxPoints 推）。
 	// structure 模式默认**不做**体素下采样；显式给 >0 时才会应用。
