@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "languages": {
+    "go":              { "extensions": [".go"], "comment": { "line": "//", "block": ["/*", "*/"] } },
+    "typescript":      { "extensions": [".ts", ".mts", ".cts"], "comment": { "line": "//", "block": ["/*", "*/"] } },
+    "typescriptreact": { "extensions": [".tsx"], "comment": { "line": "//", "block": ["{/*", "*/}"] } },
+    "javascript":      { "extensions": [".js", ".mjs", ".cjs"], "comment": { "line": "//", "block": ["/*", "*/"] } },
+    "javascriptreact": { "extensions": [".jsx"], "comment": { "line": "//", "block": ["{/*", "*/}"] } },
+    "vue":             { "extensions": [".vue"], "comment": { "line": "//", "block": ["<!--", "-->"] } },
+    "svelte":          { "extensions": [".svelte"], "comment": { "line": "//", "block": ["<!--", "-->"] } },
+    "astro":           { "extensions": [".astro"], "comment": { "line": "//", "block": ["<!--", "-->"] } },
+    "python":          { "extensions": [".py"], "comment": { "line": "#" } },
+    "rust":            { "extensions": [".rs"], "comment": { "line": "//", "block": ["/*", "*/"] } },
+    "java":            { "extensions": [".java"], "comment": { "line": "//", "block": ["/*", "*/"] } },
+    "c":               { "extensions": [".c", ".h"], "comment": { "line": "//", "block": ["/*", "*/"] } },
+    "cpp":             { "extensions": [".cc", ".cpp", ".cxx", ".hpp", ".hh"], "comment": { "line": "//", "block": ["/*", "*/"] } },
+    "csharp":          { "extensions": [".cs"], "comment": { "line": "//", "block": ["/*", "*/"] } },
+    "kotlin":          { "extensions": [".kt", ".kts"], "comment": { "line": "//", "block": ["/*", "*/"] } },
+    "swift":           { "extensions": [".swift"], "comment": { "line": "//", "block": ["/*", "*/"] } },
+    "ruby":            { "extensions": [".rb"], "comment": { "line": "#" } },
+    "php":             { "extensions": [".php"], "comment": { "line": "//", "block": ["/*", "*/"] } },
+    "shellscript":     { "extensions": [".sh", ".bash"], "comment": { "line": "#" } },
+    "yaml":            { "extensions": [".yml", ".yaml"], "comment": { "line": "#" } },
+    "markdown":        { "extensions": [".md"], "comment": { "block": ["<!--", "-->"] } }
+  }
+}

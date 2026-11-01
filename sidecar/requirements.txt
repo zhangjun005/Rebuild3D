@@ -1,0 +1,17 @@
+# Python sidecar 依赖（最小集）
+#
+# torch / torchvision 不写在这里：它们要用 CUDA 专用 index 单独安装，
+# 见 scripts/setup-env.ps1。把这个文件装进环境：
+#
+#   conda activate illust3d
+#   pip install -r sidecar/requirements.txt
+#
+# 首次安装成功后用 `pip freeze > sidecar/requirements.lock.txt` 生成锁定版本。
+
+numpy<2
+opencv-python
+pillow
+huggingface_hub
+safetensors
+einops
+omegaconf

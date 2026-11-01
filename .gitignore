@@ -1,0 +1,52 @@
+# ── Go ──
+/illust3d
+/illust3d.exe
+*.exe
+*.test
+*.out
+coverage.*
+
+# ── Node / Web ──
+web/node_modules/
+web/dist/
+web/.vite/
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# DA3 第三方源码：固定 commit，靠 scripts/setup-env.ps1 重新拉取，不进仓库
+sidecar/vendor/Depth-Anything-3/
+
+# ── 模型与缓存（一律落 E 盘，绝不进仓库）──
+*.safetensors
+*.pth
+*.ckpt
+*.onnx
+*.bin
+
+# ── 生成的产物 ──
+/out/
+/workspace/
+*.glb
+*.webm
+*.gif
+*.ply
+# 小体积测试点云要保留
+!testdata/**/*.ply
+
+# ── kron 运行时锁 ──
+.kron/.lock/
+
+# ── 旧工程（仅作参考，完整工程已丢失）──
+# 保留在磁盘上，但不进版本库：那是别人的 vendored 代码，不是本项目的源码。
+code/
+code.7z
+
+# ── 编辑器 / 系统 ──
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

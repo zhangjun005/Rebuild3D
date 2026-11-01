@@ -1,0 +1,2 @@
+# Kron configuration. v1: only `intents_dir` is honoured.
+intents_dir = ".kron/intents"
