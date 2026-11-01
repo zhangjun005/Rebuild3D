@@ -1,17 +1,66 @@
 <!-- kron:frontmatter -->
 created_by: '@zhangjun005'
-updated_at: 2026-11-01T11:59:16.0331487Z
+updated_at: 2026-11-01T11:59:35.7755581Z
+status: active
 <!-- /kron:frontmatter -->
-# z sign fix
+# 修 z 符号：反投影输出 z = -d
 
-> One-line summary of this intent's decision.
+> 地基级 bug。一行符号错误污染了三条判断，之前被误判成「点云模式天生不行」。
+> 详见假设 `depth-sign-convention`。
 
-## Why
+## 现象（实测）
 
-Record the reason for this decision.
+用 `out/sample-structure.ilcl` 按画面半径 `rho = √(x²+y²)/z` 分区量 z：
 
-## Trade-offs
+| 区域 | 平均 z |
+|---|---|
+| 画面中心（主体） | **0.48** |
+| 画面外围（背景） | **0.86** |
 
-What was chosen and what was given up.
+`d` 是距离（越大越远），但 `z = d` 且相机在 `+Z` 看 `-Z` → **背景离相机更近**，远近反向。
 
-<!-- 边界假设写在 frontmatter 的 assumptions 字段里，不在正文重复 -->
+三个被误判的症状：
+1. **空气透视把主体洗白**（把"远"当"近"，雾加在主体上）
+2. **按深度上墨落到背景**（近层上墨 → 墨落到背景板）
+3. **视差方向相反**（背景比主体动得多）
+
+## 修法
+
+`internal/geometry/unproject.go`：
+
+```
+透视:  z = -d            （原 z = d）
+正交:  z = -d * scale    （原 z = d * scale）
+```
+
+## 为什么在 Go 侧翻，不在渲染层翻
+
+两者技术上等价，但选 Go 侧：
+1. `docs/selection.md §4.4` 写的是「+z 朝观察者」，实现应对齐文档
+2. **PLY 导出**：数据里 `z=-d` 才符合 Blender/MeshLab 的通行约定
+3. 未来消费者（3DGS / mesh）不用知道特例
+
+## 执行顺序（关键）
+
+**两边只能有一边翻。** 分阶段推进，不要同时改：
+
+1. go-core 在管线侧改成 `z = -d` 并验证（语义测试：中心 z > 外围 z）
+2. Lead 通知 web-render
+3. web-render 把临时补丁 `BASE_DIR_FRONT=(0,0,+1)` 改回标准 `(0,0,-1)`，3/4 调试方向同步
+4. web-render 跑等价性确认：改完后的画面应与「Go 未翻 + 渲染层已翻」这版**等价**
+
+中间那段窗口是危险的（两边都翻 = 双重取反 = 看起来对了但实际没改）。
+
+## 防回归
+
+新增语义测试（不是断言具体数值）：
+给一张「中心深度小、外围深度大」的合成深度图，断言**中心点的 z 大于外围点的 z**。
+这个断言直接表达「主体在背景前面」的语义，比断言 `z = -d` 这种数值更难被误改。
+
+## 已修的文档
+
+`docs/selection.md §4.4`：
+- 新增「深度语义」行：`d` 越大越远
+- 新增「相机位置」行：`+Z` 朝 `-Z`
+- 透视/正交公式改为 `z = -d` / `z = -d*scale`
+- 加了一段「z 符号曾经写错过，不要改回去」的警告与历史
