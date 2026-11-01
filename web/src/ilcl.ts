@@ -68,10 +68,17 @@ export function parseIlcl(buffer: ArrayBuffer): IlcCloud {
   return { count, positions, colors, byteLength: buffer.byteLength, bounds: { min, max } };
 }
 
-/** 开发期的数据来源候选，按顺序尝试 */
+/**
+ * 样例点云的数据来源候选，按顺序尝试。
+ *
+ * 优先同源的 `/api/cloud/sample`：dev/preview 期由 vite proxy 转到 Go 服务
+ * （127.0.0.1:18123；本机 8123 被别的进程占了），构建后由 Go 直接同源提供。
+ * `/__testdata/` 是 vite 中间件（没有 Go 服务时也能开发）。
+ */
 const SOURCES: ReadonlyArray<{ url: string; label: string }> = [
+  { url: '/api/cloud/sample', label: 'Go 服务 /api/cloud/sample' },
   { url: '/__testdata/sample.ilcl', label: 'testdata/sample.ilcl（vite 中间件）' },
-  { url: 'http://127.0.0.1:8123/api/cloud/sample', label: 'Go 服务 /api/cloud/sample' },
+  { url: 'http://127.0.0.1:18123/api/cloud/sample', label: 'Go 服务（直连 18123）' },
   { url: '/sample.ilcl', label: 'web/public/sample.ilcl' },
 ];
 

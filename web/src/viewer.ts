@@ -48,10 +48,13 @@ const DEPTH_POINT_GROW = 4.0;
 /** 取景：核心半径取「到中心距离的 75 分位」，避免大片地面/背景点把相机拉飞 */
 const FRAME_RADIUS_PERCENTILE = 0.75;
 /**
- * 取景留边。0.9 = 核心半径略微溢出画面：主体占满画面（75 分位半径已经剔除了
- * 地面/背景点的长尾，所以轻微溢出不会切到主体）。
+ * 取景留边系数（> 1 = 留白，< 1 = 故意裁边）。
+ *
+ * 历史：fixture 时代取 0.9（切片地面、让主体占满画面）。
+ * 真实插画**不行**——插画的边缘就是构图，按 0.9 会裁掉一圈（实测裁掉约 10%）。
+ * 现在按实际投影点套框，统一留 4% 白边。
  */
-const FRAME_MARGIN = 0.9;
+const FRAME_MARGIN = 1.04;
 /** 点大小自适应：点径 ≈ 屏幕点间距 × 这个系数（0.5 → 相邻点略微交叠） */
 const POINT_SIZE_PER_SPACING = 0.5;
 /** 自适应点大小的上下限（CSS 像素） */
@@ -178,6 +181,8 @@ interface PointUniforms {
   uMono: NumericUniform;
   uFogAmount: NumericUniform;
   uBoilSeed: NumericUniform;
+  uToneLow: NumericUniform;
+  uToneHigh: NumericUniform;
 }
 
 interface DepthUniforms {
@@ -218,6 +223,7 @@ interface HalftoneUniforms extends CompositeUniforms {
   uHalftoneAngle: NumericUniform;
   uDensityGamma: NumericUniform;
   uHalftoneOffset: THREE.IUniform<THREE.Vector2>;
+  uToneRange: THREE.IUniform<THREE.Vector2>;
 }
 
 /** 铜版画的合成 pass uniform（排线相关） */
@@ -230,6 +236,7 @@ interface EngravingUniforms extends CompositeUniforms {
   uPosterizeLevels: NumericUniform;
   uDensityGamma: NumericUniform;
   uScreenOffset: THREE.IUniform<THREE.Vector2>;
+  uToneRange: THREE.IUniform<THREE.Vector2>;
 }
 
 /** 配置 blue noise 纹理（点画阈值 + 纸颗粒共用） */
@@ -242,6 +249,24 @@ export function configureBlueNoiseTexture(texture: THREE.Texture): THREE.Texture
   texture.colorSpace = THREE.NoColorSpace;
   texture.needsUpdate = true;
   return texture;
+}
+
+/**
+ * 每点随机数 [0,1)：点云加载时一次性生成（确定性 mulberry32，便于复现）。
+ * 用它代替 shader 里的位置哈希做点画/密度抽稀——真实深度点云是规则网格，
+ * 位置哈希在格点上会相关，屏幕上出现条带状摩尔纹。
+ */
+function createPointRandoms(count: number): Float32Array {
+  const randoms = new Float32Array(count);
+  let state = 0x9e3779b9;
+  for (let i = 0; i < count; i++) {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    randoms[i] = ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+  return randoms;
 }
 
 /** 确定性 0..1 哈希：沸腾相位只依赖帧号，保证 GIF 循环不跳帧 */
@@ -328,6 +353,9 @@ export class Viewer {
   private cloudPosition: THREE.BufferAttribute | null = null;
   /** 当前基准视角是否 3/4（用于检测开关变化） */
   private threeQuarterView = false;
+  /** 自动色调范围（点云亮度 5~95 分位）：真实插画整片偏亮/偏暗时保证疏密仍然可用 */
+  private toneLow = 0;
+  private toneHigh = 1;
   /** 参数被内部改动（例如拖拽自动关掉摆动）时通知面板同步 */
   onInternalParamChange: (() => void) | null = null;
 
@@ -402,6 +430,8 @@ export class Viewer {
       uMono: { value: this.params.mono },
       uFogAmount: { value: this.params.fogAmount },
       uBoilSeed: { value: 0 },
+      uToneLow: { value: 0 },
+      uToneHigh: { value: 1 },
     };
 
     this.depthUniforms = {
@@ -482,6 +512,7 @@ export class Viewer {
       uHalftoneAngle: { value: THREE.MathUtils.degToRad(this.params.halftoneAngle) },
       uDensityGamma: { value: this.params.densityGamma },
       uHalftoneOffset: { value: new THREE.Vector2() },
+      uToneRange: { value: new THREE.Vector2(0, 1) },
     };
     this.halftoneMaterial = new THREE.ShaderMaterial({
       name: 'halftone-manga/composite',
@@ -503,6 +534,7 @@ export class Viewer {
       uPosterizeLevels: { value: this.params.posterizeLevels },
       uDensityGamma: { value: this.params.densityGamma },
       uScreenOffset: { value: new THREE.Vector2() },
+      uToneRange: { value: new THREE.Vector2(0, 1) },
     };
     this.engravingMaterial = new THREE.ShaderMaterial({
       name: 'engraving/composite',
@@ -540,6 +572,8 @@ export class Viewer {
     geometry.setAttribute('position', position);
     // u8 归一化属性：shader 里 aColor 直接是 0..1
     geometry.setAttribute('aColor', new THREE.BufferAttribute(cloud.colors, 3, true));
+    // 每点随机数（与位置无关）：点画抽稀/密度抽稀都用它，避免规则网格的摩尔纹
+    geometry.setAttribute('aRandom', new THREE.BufferAttribute(createPointRandoms(cloud.count), 1));
     geometry.computeBoundingBox();
     geometry.computeBoundingSphere();
 
@@ -559,7 +593,9 @@ export class Viewer {
    *
    * 真实点云（单图深度估计）的尺度、位置、朝向、点数都和测试点云不一样，
    * 所以这些量一个都不能写死：
-   *   - 相机距离 / 目标点 → 由「核心半径」决定（75 分位，不让大片地面/背景把相机拉飞）
+   *   - 相机距离 → 用**实际投影点精确套框**（见 fitDistanceFromGeometry）：插画的边缘就是构图，
+   *     必须整幅都进画面。早期用的「75 分位核心半径」是为 fixture 的地面长尾设计的，
+   *     在真实插画上会过度放大（只看到局部，实测 198k 点那版就是这样）
    *   - uPointSize 的参考视距 refDepth → 跟着取景距离走，换尺度后点的屏幕大小不变
    *   - 空气透视 / 描边归一化的深度区间 → 同上
    *   - 点大小 → 由估算的「屏幕点间距」决定，点数变少时点自动变大，覆盖率不塌
@@ -578,11 +614,10 @@ export class Viewer {
     const size = box.getSize(new THREE.Vector3());
     const diagonal = Math.max(size.length(), 1e-6);
 
-    // 核心半径：到中心距离的 75 分位（稳健，不被少数离群点/地面拉飞）
+    // 核心半径（仍算了：给 OrbitControls 的缩放范围与视差幅度当"场景尺度"用）
     const radius = Math.max(this.percentileRadius(position, center, FRAME_RADIUS_PERCENTILE), 1e-6);
 
     const fovRad = THREE.MathUtils.degToRad(this.camera.fov);
-    const fitDistance = (radius / Math.sin(fovRad / 2)) * FRAME_MARGIN;
 
     // 基准方向：正面（默认）或 3/4（调试开关）
     this.threeQuarterView = this.params.threeQuarterView;
@@ -594,6 +629,9 @@ export class Viewer {
     // 取景基准位姿：摆动与角度限位都围绕它
     this.baseAzimuth = Math.atan2(dir.x, dir.z);
     this.baseElevation = Math.asin(dir.y);
+
+    // 相机距离：包围盒精确套框（整幅插画进画面），留 FRAME_MARGIN 边
+    const fitDistance = this.fitDistanceFromGeometry(position, center, dir, fovRad, diagonal);
 
     this.camera.near = Math.max(fitDistance * 0.005, 1e-5);
     this.camera.far = fitDistance * 12 + diagonal * 2;
@@ -613,8 +651,14 @@ export class Viewer {
 
     // 尺度相关参数：换尺度后观感保持一致
     this.refDepth = (options.preserveDistance ?? fitDistance) * 0.91;
-    this.depthNear = (options.preserveDistance ?? fitDistance) * 0.57;
-    this.depthFar = (options.preserveDistance ?? fitDistance) * 1.82;
+
+    // 深度区间：用**包围盒沿视线的真实深度跨度**，而不是取景距离的比例。
+    // 用取景距离的比例会在真实插画上把整个深度跨度压到 0.1 以内：
+    //   - 空气透视（雾）几乎不动 → 远近没差别
+    //   - 描边归一化的梯度尺度也失真（阈值语义随数据漂移）
+    const viewDepth = this.viewDepthRange(box, center, dir, options.preserveDistance ?? fitDistance);
+    this.depthNear = viewDepth.near;
+    this.depthFar = viewDepth.far;
     this.applyDepthRange();
 
     // 点大小自适应：点云来自深度图，基本是 2.5D 面 → 间距 ≈ 对角线 / sqrt(点数)
@@ -629,7 +673,146 @@ export class Viewer {
         POINT_SIZE_MAX,
       );
     }
+    this.computeToneRange(geometry);
     this.applyParams();
+  }
+
+  /**
+   * 自动色调范围（auto-levels）：点云亮度的 5~95 分位。
+   *
+   * 真实插画经常整片偏亮（白底/浅色角色），若直接用绝对亮度做「暗处点密」，
+   * 亮部会全部变成空白纸、画面散架。取分位数归一化后，疏密对比才落在真实动态范围上。
+   * 这是印刷里的 auto-levels，不是为某张图调参。
+   */
+  private computeToneRange(geometry: THREE.BufferGeometry): void {
+    const attribute = geometry.getAttribute('aColor') as THREE.BufferAttribute | undefined;
+    if (!attribute) {
+      this.toneLow = 0;
+      this.toneHigh = 1;
+      return;
+    }
+    const array = attribute.array as ArrayLike<number>;
+    const scale = array instanceof Uint8Array ? 1 / 255 : 1;
+    const count = attribute.count;
+    const stride = Math.max(1, Math.floor(count / 8000));
+    const lumas: number[] = [];
+    for (let i = 0; i < count; i += stride) {
+      const r = (array[i * 3] ?? 0) * scale;
+      const g = (array[i * 3 + 1] ?? 0) * scale;
+      const b = (array[i * 3 + 2] ?? 0) * scale;
+      lumas.push(0.299 * r + 0.587 * g + 0.114 * b);
+    }
+    if (lumas.length === 0) {
+      this.toneLow = 0;
+      this.toneHigh = 1;
+      return;
+    }
+    lumas.sort((a, b) => a - b);
+    const low = lumas[Math.floor(lumas.length * 0.05)] as number;
+    const high = lumas[Math.min(lumas.length - 1, Math.floor(lumas.length * 0.95))] as number;
+    const span = Math.max(high - low, 0.08); // 纯色点云也要留一点跨度，避免除零
+    this.toneLow = Math.max(0, low - span * 0.05);
+    this.toneHigh = Math.min(1, high + span * 0.05);
+  }
+
+  /** 包围盒沿视线方向的深度跨度（世界单位），两侧留一点边 */
+  private viewDepthRange(
+    box: THREE.Box3,
+    center: THREE.Vector3,
+    dir: THREE.Vector3,
+    distance: number,
+  ): { near: number; far: number } {
+    const viewDir = dir.clone().negate();
+    const corner = new THREE.Vector3();
+    let minAlong = Infinity;
+    let maxAlong = -Infinity;
+    for (let ix = 0; ix < 2; ix++) {
+      for (let iy = 0; iy < 2; iy++) {
+        for (let iz = 0; iz < 2; iz++) {
+          corner.set(
+            ix ? box.max.x : box.min.x,
+            iy ? box.max.y : box.min.y,
+            iz ? box.max.z : box.min.z,
+          );
+          const along = corner.clone().sub(center).dot(viewDir);
+          if (along < minAlong) minAlong = along;
+          if (along > maxAlong) maxAlong = along;
+        }
+      }
+    }
+    const span = Math.max(maxAlong - minAlong, Math.max(distance * 0.02, 1e-4));
+    const pad = Math.max(span * 0.06, 1e-4);
+    return {
+      near: Math.max(distance + minAlong - pad, 1e-3),
+      far: distance + maxAlong + pad,
+    };
+  }
+
+  /**
+   * 相机的「精确套框」距离：让**实际点**都落在视锥内（留 FRAME_MARGIN 边）。
+   *
+   * 相机在 `center + dir·D`，看向 center。对每个点 p：
+   *   a = (p - center)·(-dir)      // 沿视线的深度偏移（正 = 更远）
+   *   x = |(p - center)·right|, y = |(p - center)·up|
+   *   需要 x ≤ tanH·(D + a), y ≤ tanV·(D + a)
+   *   ⇒ D ≥ max(x/tanH, y/tanV) - a
+   *
+   * 用实际点而不是包围盒 8 个角：真实深度点云是「主体板 + 背景板」，
+   * 包围盒的角往往是空的（z 极值处的 x/y 并不存在），按角点套框会算得太近。
+   * 抽样 4000 个点 + 用分位数（0.2%~99.8%）抗离群点。
+   */
+  private fitDistanceFromPoints(
+    position: THREE.BufferAttribute,
+    center: THREE.Vector3,
+    dir: THREE.Vector3,
+    fovRad: number,
+  ): number {
+    const count = position.count;
+    const stride = Math.max(1, Math.floor(count / 4000));
+    const viewDir = dir.clone().negate();
+    const right = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), dir);
+    if (right.lengthSq() < 1e-6) right.set(1, 0, 0);
+    right.normalize();
+    const up = new THREE.Vector3().crossVectors(dir, right).normalize();
+
+    const tanV = Math.tan(fovRad / 2);
+    const aspect = this.camera.aspect > 0 ? this.camera.aspect : 1;
+    const tanH = tanV * aspect;
+
+    const needed: number[] = [];
+    for (let i = 0; i < count; i += stride) {
+      const dx = position.getX(i) - center.x;
+      const dy = position.getY(i) - center.y;
+      const dz = position.getZ(i) - center.z;
+      const along = dx * viewDir.x + dy * viewDir.y + dz * viewDir.z;
+      const x = Math.abs(dx * right.x + dy * right.y + dz * right.z);
+      const y = Math.abs(dx * up.x + dy * up.y + dz * up.z);
+      needed.push(Math.max(x / tanH, y / tanV) - along);
+    }
+    if (needed.length === 0) return 1;
+    needed.sort((a, b) => a - b);
+    const index = Math.min(needed.length - 1, Math.floor(needed.length * 0.998));
+    const picked = Math.max(needed[index] as number, 1e-6);
+    return picked * FRAME_MARGIN;
+  }
+
+  /**
+   * 相机距离：按实际点套框（整幅插画进画面）。
+   *
+   * 早期用的是「75 分位核心半径 / sin(fov/2)」+ 包围盒套框，两者在真实插画上都会
+   * 过度放大（只看到局部）。真实点云是「主体板 + 背景板」，必须按实际投影点算。
+   */
+  private fitDistanceFromGeometry(
+    position: THREE.BufferAttribute,
+    center: THREE.Vector3,
+    dir: THREE.Vector3,
+    fovRad: number,
+    diagonal: number,
+  ): number {
+    return Math.max(
+      this.fitDistanceFromPoints(position, center, dir, fovRad),
+      diagonal * 0.2,
+    );
   }
 
   /** 基准视角切换后重新取景（保持当前点大小与视距） */
@@ -788,6 +971,10 @@ export class Viewer {
     this.pointUniforms.uDensityGamma.value = p.densityGamma;
     this.pointUniforms.uMono.value = p.mono;
     this.pointUniforms.uFogAmount.value = p.fogAmount;
+    this.pointUniforms.uToneLow.value = this.toneLow;
+    this.pointUniforms.uToneHigh.value = this.toneHigh;
+    this.halftoneUniforms.uToneRange.value.set(this.toneLow, this.toneHigh);
+    this.engravingUniforms.uToneRange.value.set(this.toneLow, this.toneHigh);
 
     this.compositeUniforms.uEdgeStrength.value = p.edgeStrength;
     this.compositeUniforms.uEdgeThreshold.value = p.edgeThreshold;

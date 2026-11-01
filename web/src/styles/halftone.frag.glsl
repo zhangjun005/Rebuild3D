@@ -31,6 +31,7 @@ uniform float uHalftoneStrength; // 0..1 网点强度（0 时退回连续调）
 uniform float uHalftoneCell; // 网点 cell 大小（像素）
 uniform float uHalftoneAngle; // 网屏角度（弧度）
 uniform float uDensityGamma; // 明暗曲线（>1 对比更强）
+uniform vec2 uToneRange; // 自动色调范围（点云亮度 5~95 分位）
 uniform vec2 uHalftoneOffset; // 抖动换序：网点网格平移（像素）
 
 // 描边
@@ -57,8 +58,13 @@ void main() {
 
   // ── L2 半调网点 ────────────────────────────────────────────────────────────
   // 亮度 → 网点半径：暗处点大（覆盖率高），亮处点小（留白）
-  float lum = dot(color, LUMA);
-  float tone = pow(clamp(lum, 0.0, 1.0), uDensityGamma);
+  // 自动色调范围归一化（真实插画整体偏亮时，不归一化会全场没点）
+  float lum = clamp(
+    (dot(color, LUMA) - uToneRange.x) / max(uToneRange.y - uToneRange.x, 1e-3),
+    0.0,
+    1.0
+  );
+  float tone = pow(lum, uDensityGamma);
 
   vec2 shifted = gl_FragCoord.xy + uHalftoneOffset;
   float cosA = cos(uHalftoneAngle);

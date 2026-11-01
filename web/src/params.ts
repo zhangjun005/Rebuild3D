@@ -134,7 +134,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
       stipple: 0.9,
       densityGamma: 1.3,
       edgeStrength: 1.0,
-      edgeThreshold: 0.14,
+      edgeThreshold: 0.3,
       edgeWidth: 2.0,
       mono: 1.0,
       boil: true,
@@ -162,7 +162,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
       stipple: 0.0,
       densityGamma: 1.2,
       edgeStrength: 1.6, // 粗描边
-      edgeThreshold: 0.1,
+      edgeThreshold: 0.22,
       edgeWidth: 2.6,
       mono: 0.0,
       halftone: 1.0,
@@ -193,7 +193,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
       stipple: 0.0,
       densityGamma: 1.3, // 屏幕化的调子曲线
       edgeStrength: 1.1,
-      edgeThreshold: 0.14,
+      edgeThreshold: 0.3,
       edgeWidth: 2.0,
       mono: 0.0,
       engraving: 1.0,
@@ -221,7 +221,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
       stipple: 0.85,
       densityGamma: 2.0, // 中间调调亮，把画面让给线条
       edgeStrength: 1.4,
-      edgeThreshold: 0.12,
+      edgeThreshold: 0.3,
       edgeWidth: 1.9,
       mono: 1.0,
       boil: false,

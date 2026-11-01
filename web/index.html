@@ -238,6 +238,34 @@
         transform: translate(-50%, -50%);
         box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12);
       }
+      /* ── 输入区（真实插画上传）── */
+      .input-section {
+        margin-bottom: 4px;
+      }
+      .input-status {
+        min-height: 15px;
+        font-size: 10.5px;
+        line-height: 1.5;
+        color: var(--ui-dim);
+        white-space: pre-wrap;
+      }
+      .drop-overlay {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(20, 18, 15, 0.55);
+        border: 3px dashed var(--ui-accent);
+        color: #fff;
+        font-size: 20px;
+        letter-spacing: 0.05em;
+        z-index: 50;
+        pointer-events: none;
+      }
+      .drop-overlay.active {
+        display: flex;
+      }
     </style>
   </head>
   <body>

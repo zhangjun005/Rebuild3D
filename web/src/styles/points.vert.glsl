@@ -33,26 +33,25 @@ uniform float uDensityGamma; // 明暗 → 密度曲线
 uniform float uFogAmount; // 空气透视强度
 uniform vec3 uPaper; // 纸色（空气透视终点）
 uniform float uBoilSeed; // 沸腾：每相一个整数种子（相位由 JS 按可回绕时钟算）
+uniform float uToneLow; // 自动色调范围下界（点云亮度的 5 分位）
+uniform float uToneHigh; // 自动色调范围上界（95 分位）
 
 attribute vec3 aColor; // u8 归一化颜色（0..1）
+attribute float aRandom; // 每点随机 0..1（CPU 端生成，与位置无关！）
 
 varying vec3 vColor;
 varying float vFog; // 0 = 近，1 = 远
 
 const vec3 LUMA = vec3(0.299, 0.587, 0.114);
 
-/** 确定性 3D → [0,1) 哈希（Dave Hoskins hash13），GPU 上精度稳定 */
-float hash13(vec3 p3) {
-  p3 = fract(p3 * 0.1031);
-  p3 += dot(p3, p3.yzx + 33.33);
-  return fract((p3.x + p3.y) * p3.z);
-}
+// ★ 为什么点画抽稀用 aRandom 而不是位置哈希：
+//   真实深度点云是**规则网格**（深度图 504×504 逐像素反投影），对格点做位置哈希
+//   会让相邻格点的哈希值相关 → 屏幕上出现条带状摩尔纹（真实插画实测可见）。
+//   CPU 端生成的 aRandom 真正与位置无关。
 
 void main() {
-  // ── 点数密度：逐点均匀抽稀 ──────────────────────────────────────────────
-  // 不用 geometry.setDrawRange 的原因：ILC1 的点是按「地面 → 球 → 立方体」排的，
-  // 按抽头截断会让密度一降就只剩地面。逐点哈希在空间上均匀，转相机也不跳（§5）。
-  if (uDensity < 0.999 && hash13(position + 1.7) > uDensity) {
+  // ── 点数密度：逐点均匀抽稀（用 aRandom，与位置无关）─────────────────────
+  if (uDensity < 0.999 && aRandom > uDensity) {
     gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
     gl_PointSize = 0.0;
     return;
@@ -72,7 +71,13 @@ void main() {
     // 保留概率只看亮度（空气透视会把远处推亮 → 远处自然变稀）。
     // 单色墨点模式下点色是统一的墨色，所以这里不掺 duotone：明暗只由疏密表达。
     vec3 pc = mix(aColor, uPaper, vFog * uFogAmount);
-    float lum = dot(pc, LUMA);
+    // 自动色调范围（auto-levels）：真实插画的亮度可能整片偏亮（比如白底角色），
+    // 直接用绝对亮度会让「亮部全成空白纸」。按 5~95 分位归一化后才谈得上疏密对比。
+    float lum = clamp(
+      (dot(pc, LUMA) - uToneLow) / max(uToneHigh - uToneLow, 1e-3),
+      0.0,
+      1.0
+    );
 
     // §2.1「暗处点密、亮处点疏」：墨水点在纸上是靠覆盖率表达暗部，
     // 所以保留概率 = 1 - 亮度；高光处趋 0（留白），暗部覆盖率最高。
@@ -80,10 +85,8 @@ void main() {
       pow(clamp(1.0 - lum, 0.0, 1.0), uDensityGamma) * (1.0 - vFog * uFogAmount);
 
     // 沸腾：种子一变，整套点的去留重掷一次 → 手绘动画的「重画」感（§3）。
-    // 种子来自可回绕时钟，所以 48 帧一循环不跳帧（§9「GIF 循环跳帧」）。
-    float seed = uBoilSeed;
-    vec3 seedOffset = vec3(seed * 13.17, seed * 7.31, seed * 3.77);
-    float r = hash13(position * 1.37 + seedOffset);
+    // aRandom 是每点独立随机，叠加相位种子后仍然是"重掷"而不是"平移"。
+    float r = fract(aRandom + uBoilSeed * 0.6180339887);
 
     if (r > mix(1.0, density, clamp(uStipple, 0.0, 1.0))) {
       gl_Position = vec4(2.0, 2.0, 2.0, 1.0);

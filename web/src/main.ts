@@ -22,6 +22,7 @@ import {
   resolveOutputSize,
   verifySeam,
 } from './capture';
+import { fetchHealth, inferIllustration, waitForSidecar } from './infer';
 import { loadSampleCloud, parseIlcl } from './ilcl';
 import { Panel, type ExportRequest } from './panel';
 import { DEFAULT_PRESET } from './params';
@@ -85,6 +86,12 @@ async function boot(): Promise<void> {
     onPreset: (key) => viewer.applyPreset(key),
     onExport: (request) => {
       void runExport(request);
+    },
+    onUpload: (file) => {
+      void handleUpload(file);
+    },
+    onLoadSample: () => {
+      void reloadSample();
     },
   });
   viewer.onStats = (stats) => panel.updateStats(stats);
@@ -193,18 +200,119 @@ async function boot(): Promise<void> {
   // 5) 跑起来
   viewer.start();
 
-  /**
-   * 换一份点云（真实深度点云接进来时走这里；也方便用控制台/自动化喂数据）。
-   * 自适应取景、点大小、空气透视深度区间都在 Viewer.setCloud 里按新包围盒重算。
-   */
-  const loadILC1 = (buffer: ArrayBuffer, label = '内存中的 ILC1'): number => {
-    const next = parseIlcl(buffer);
+  /** 应用一份点云（自适应取景/点大小/深度区间都在 Viewer.setCloud 里重算） */
+  const applyCloud = (next: ReturnType<typeof parseIlcl>, label: string): void => {
     viewer.setCloud(next, label);
     panel.setSource(label);
     panel.sync();
+  };
+
+  /**
+   * 换一份点云（真实深度点云接进来时走这里；也方便用控制台/自动化喂数据）。
+   */
+  const loadILC1 = (buffer: ArrayBuffer, label = '内存中的 ILC1'): number => {
+    const next = parseIlcl(buffer);
+    applyCloud(next, label);
     console.info(`[illust3d] 已切换到 ${label} · ${next.count.toLocaleString('en-US')} 点`);
     return next.count;
   };
+
+  // ── 真实插画 → POST /api/infer → ILC1 → 渲染 ──────────────────────────────
+  let busy = false;
+  async function handleUpload(file: File): Promise<void> {
+    if (busy) return;
+    busy = true;
+    panel.setInputBusy(true);
+    try {
+      panel.setInputStatus(`读取 ${file.name}（${(file.size / 1048576).toFixed(1)} MB）…`);
+      const health = await fetchHealth();
+      if (!health) {
+        throw new Error('连不上 Go 服务 /api/health（用 out\\illust3d.exe -web-dist web/dist 起服务）');
+      }
+      if (!health.sidecar) {
+        throw new Error('Go 服务没有启用 sidecar（启动时加 -sidecar-python）');
+      }
+      if (!health.sidecar.ready) {
+        panel.setInputStatus(
+          `模型加载中…（${health.sidecar.warming ? 'warming' : '未就绪'}，实测 7~12s）`,
+        );
+        const status = await waitForSidecar({
+          onTick: (s, seconds) => {
+            panel.setInputStatus(
+              s?.ready
+                ? `模型就绪（加载 ${(s.load_seconds ?? 0).toFixed(1)}s）`
+                : `模型加载中… 已等 ${seconds.toFixed(0)}s${s?.warming ? '（warming）' : ''}`,
+            );
+          },
+        });
+        panel.setInputStatus(`模型就绪（加载 ${(status.load_seconds ?? 0).toFixed(1)}s，显存 ${Math.round(status.vram_used_mb ?? 0)} MiB）`);
+      }
+
+      panel.setInputStatus('推理中…（深度 → 点云）');
+      const result = await inferIllustration(file, {
+        onPhase: (phase) => panel.setInputStatus(phase),
+      });
+      applyCloud(result.cloud, `${file.name} · ${result.metrics.pointCount.toLocaleString('en-US')} 点`);
+      const m = result.metrics;
+      panel.setInputStatus(
+        [
+          `完成：${m.pointCount.toLocaleString('en-US')} 点 · 深度 ${m.depthWidth}×${m.depthHeight}`,
+          `推理 ${m.inferMs.toFixed(0)}ms · 几何 ${m.geometryMs.toFixed(0)}ms · 合计 ${m.totalMs.toFixed(0)}ms`,
+          `ILC1 ${(result.buffer.byteLength / 1048576).toFixed(2)} MB`,
+        ].join('\n'),
+      );
+      console.info('[illust3d] 推理完成', m);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[illust3d] 插画推理失败', error);
+      panel.setInputStatus(`失败：${message}`);
+    } finally {
+      busy = false;
+      panel.setInputBusy(false);
+    }
+  }
+
+  async function reloadSample(): Promise<void> {
+    if (busy) return;
+    try {
+      panel.setInputStatus('加载样例点云…');
+      const loaded = await loadSampleCloud();
+      applyCloud(loaded.cloud, loaded.source);
+      panel.setInputStatus(`样例点云：${loaded.cloud.count.toLocaleString('en-US')} 点`);
+    } catch (error) {
+      panel.setInputStatus(`样例点云加载失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  // 全窗口拖拽上传
+  const dropOverlay = document.createElement('div');
+  dropOverlay.className = 'drop-overlay';
+  dropOverlay.textContent = '松手上传插画 → 深度 → 点云';
+  document.body.append(dropOverlay);
+  let dragDepth = 0;
+  const hasFiles = (event: DragEvent): boolean =>
+    Array.from(event.dataTransfer?.types ?? []).includes('Files');
+  window.addEventListener('dragenter', (event) => {
+    if (!hasFiles(event)) return;
+    dragDepth += 1;
+    dropOverlay.classList.add('active');
+  });
+  window.addEventListener('dragleave', () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) dropOverlay.classList.remove('active');
+  });
+  window.addEventListener('dragover', (event) => {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    event.dataTransfer!.dropEffect = 'copy';
+  });
+  window.addEventListener('drop', (event) => {
+    event.preventDefault();
+    dragDepth = 0;
+    dropOverlay.classList.remove('active');
+    const file = event.dataTransfer?.files?.[0];
+    if (file) void handleUpload(file);
+  });
 
   window.illust3d = {
     viewer,

@@ -30,6 +30,7 @@ uniform float uHatchSpacing; // 屏幕像素
 uniform float uHatchAngle; // 第一层角度（弧度）
 uniform float uPosterizeLevels; // 3..5
 uniform float uDensityGamma; // 调子曲线
+uniform vec2 uToneRange; // 自动色调范围（点云亮度 5~95 分位）
 uniform vec2 uScreenOffset; // 抖动换序（像素）
 
 // 描边
@@ -65,7 +66,12 @@ float hatchLayer(vec2 p, float angle, float spacing) {
 
 void main() {
   vec3 color = texture2D(tColor, vUv).rgb;
-  float lum = dot(color, LUMA);
+  // 自动色调范围归一化（真实插画整体偏亮时，不归一化会全场没线）
+  float lum = clamp(
+    (dot(color, LUMA) - uToneRange.x) / max(uToneRange.y - uToneRange.x, 1e-3),
+    0.0,
+    1.0
+  );
 
   // ── 调子 → posterize ──────────────────────────────────────────────────────
   float tone = pow(clamp(lum, 0.0, 1.0), uDensityGamma);

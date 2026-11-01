@@ -71,6 +71,10 @@ export interface PanelOptions {
   onChange: () => void;
   onPreset: (key: PresetKey) => void;
   onExport: (request: ExportRequest) => void;
+  /** 用户选了插画文件（→ POST /api/infer） */
+  onUpload: (file: File) => void;
+  /** 回到内置 fixture 点云 */
+  onLoadSample: () => void;
 }
 
 export class Panel {
@@ -90,6 +94,9 @@ export class Panel {
   private sizeSelect: HTMLSelectElement | null = null;
   private exportButtons: HTMLButtonElement[] = [];
   private statusElement: HTMLElement | null = null;
+  /** 输入区控件（file input 供自动化 / 重复选择用） */
+  uploadInput: HTMLInputElement | null = null;
+  private inputStatusElement: HTMLElement | null = null;
 
   constructor(options: PanelOptions) {
     this.params = options.params;
@@ -112,6 +119,9 @@ export class Panel {
     // 参数区可滚动、导出区钉在底部（参数多，不能把导出按钮挤出去）
     const scrollArea = document.createElement('div');
     scrollArea.className = 'panel-scroll';
+
+    // ── 输入（真实插画 → /api/infer）──
+    scrollArea.append(this.buildInputSection(options));
 
     // ── 预设 ──
     const presets = document.createElement('div');
@@ -248,6 +258,70 @@ export class Panel {
       input.value = this.params[key];
     });
     return row;
+  }
+
+  // ── 输入区（真实插画 → POST /api/infer）──────────────────────────────────
+  private buildInputSection(options: PanelOptions): HTMLElement {
+    const section = document.createElement('div');
+    section.className = 'input-section';
+
+    const heading = document.createElement('div');
+    heading.className = 'export-title';
+    heading.textContent = '插画输入';
+    section.append(heading);
+
+    const buttons = document.createElement('div');
+    buttons.className = 'export-buttons';
+
+    const pick = document.createElement('button');
+    pick.type = 'button';
+    pick.textContent = '选择插画…';
+    pick.title = '上传插画（png / jpeg / gif）→ 深度 → 点云';
+
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/png,image/jpeg,image/gif';
+    input.hidden = true;
+    input.addEventListener('change', () => {
+      const file = input.files?.[0];
+      if (file) options.onUpload(file);
+      input.value = ''; // 允许重复选同一个文件
+    });
+    pick.addEventListener('click', () => input.click());
+
+    const sample = document.createElement('button');
+    sample.type = 'button';
+    sample.textContent = '样例点云';
+    sample.title = '回到内置 fixture（testdata/sample.ilcl）';
+    sample.addEventListener('click', () => options.onLoadSample());
+
+    buttons.append(pick, sample);
+    section.append(buttons, input);
+
+    const status = document.createElement('div');
+    status.className = 'input-status';
+    status.textContent = '拖一张插画到窗口也行';
+    section.append(status);
+
+    this.uploadInput = input;
+    this.inputStatusElement = status;
+    return section;
+  }
+
+  /** 输入区状态文字（加载中/推理中/结果） */
+  setInputStatus(text: string): void {
+    if (this.inputStatusElement) this.inputStatusElement.textContent = text;
+  }
+
+  /** 推理期间禁用面板控件，避免中途改参数/重复上传 */
+  setInputBusy(busy: boolean): void {
+    this.container.classList.toggle('busy', busy);
+    const controls = this.container.querySelectorAll<
+      HTMLInputElement | HTMLSelectElement | HTMLButtonElement
+    >('input, select, button');
+    for (const element of controls) {
+      element.disabled = busy;
+    }
   }
 
   // ── 导出区 ──────────────────────────────────────────────────────────────

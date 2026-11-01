@@ -5,6 +5,12 @@ import { defineConfig, type Connect, type Plugin } from 'vite';
 
 /** 仓库根目录（web/ 的上一级） */
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * Go 服务地址（端口 18123：本机 8123 被别的进程占了）。
+ * 开发/预览时用 vite proxy 转成同源 /api/*，这样不用配 CORS。
+ */
+const GO_SERVICE = process.env.ILLUST3D_GO ?? 'http://127.0.0.1:18123';
 const TESTDATA_DIR = path.join(REPO_ROOT, 'testdata');
 
 /**
@@ -62,11 +68,14 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 5173,
     strictPort: true,
+    // Go 服务的同源代理：前端一律请求 /api/*，不用管 CORS 与端口
+    proxy: { '/api': GO_SERVICE },
   },
   preview: {
     host: '127.0.0.1',
     port: 4173,
     strictPort: true,
+    proxy: { '/api': GO_SERVICE },
   },
   build: {
     target: 'es2022',
