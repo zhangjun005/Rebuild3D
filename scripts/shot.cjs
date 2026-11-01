@@ -15,7 +15,10 @@
 //   --wait <ms>                  加载后等待（默认 2000）
 //   --ilcl <path>                读取 ILC1 并调 window.illust3d.loadILC1()
 //   --preset <key>               切预设（stipple-print / halftone-manga / engraving / ink / raw）
-//   --params '<json>'            覆盖参数，如 '{"inkSource":"depth","inkPolarity":"dark"}'
+//   --params '<json>'            覆盖参数，如 '{"inkSource":"depth"}'
+//                                ⚠ PowerShell 会吃掉 JSON 里的双引号，优先用 --param
+//   --param <k=v>                覆盖单个参数（可重复），值自动识别 number/bool/string
+//                                PowerShell 里安全，例：--param inkSource=depth --param inkPolarity=dark
 //   --clip <x,y,w,h>             只截指定区域
 //   --no-panel                   裁掉右侧面板（约 275px 宽）
 //
@@ -38,6 +41,7 @@ function parseArgs(argv) {
     ilcl: null,
     preset: null,
     params: null,
+    paramList: [],
     clip: null,
     noPanel: false,
   };
@@ -49,6 +53,7 @@ function parseArgs(argv) {
     else if (a === '--ilcl') o.ilcl = argv[++i];
     else if (a === '--preset') o.preset = argv[++i];
     else if (a === '--params') o.params = JSON.parse(argv[++i]);
+    else if (a === '--param') o.paramList.push(argv[++i]);
     else if (a === '--clip') {
       const [x, y, w, h] = argv[++i].split(',').map(Number);
       o.clip = { x, y, width: w, height: h };
@@ -117,15 +122,31 @@ function parseArgs(argv) {
     console.log('[preset]', o.preset);
   }
 
-  // 3) 覆盖参数
-  if (o.params && ready) {
-    await page.evaluate((patch) => {
+  // 3) 覆盖参数（--params JSON 或 --param k=v，后者可重复且对 PowerShell 安全）
+  const patch = { ...(o.params || {}) };
+  for (const kv of o.paramList) {
+    const idx = kv.indexOf('=');
+    if (idx < 0) {
+      console.log('⚠ --param 格式应为 k=v，忽略:', kv);
+      continue;
+    }
+    const k = kv.slice(0, idx);
+    const raw = kv.slice(idx + 1);
+    let v;
+    if (raw === 'true') v = true;
+    else if (raw === 'false') v = false;
+    else if (raw !== '' && !Number.isNaN(Number(raw))) v = Number(raw);
+    else v = raw;
+    patch[k] = v;
+  }
+  if (Object.keys(patch).length && ready) {
+    await page.evaluate((p) => {
       const api = /** @type {any} */ (globalThis).illust3d;
-      Object.assign(api.viewer.params, patch);
+      Object.assign(api.viewer.params, p);
       api.viewer.setParams(api.viewer.params);
       api.syncPanel();
-    }, o.params);
-    console.log('[params]', JSON.stringify(o.params));
+    }, patch);
+    console.log('[params]', JSON.stringify(patch));
   }
 
   await page.waitForTimeout(o.wait);
