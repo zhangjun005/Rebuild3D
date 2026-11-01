@@ -72,7 +72,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
       softness: 0.6,
       density: 1.0,
       stipple: 0.9,
-      densityGamma: 1.0,
+      densityGamma: 1.3,
       edgeStrength: 1.0,
       edgeThreshold: 0.14,
       edgeWidth: 2.0,
