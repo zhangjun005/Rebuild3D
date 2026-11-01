@@ -46,6 +46,11 @@ export interface RenderParams {
   colorPosterize: number;
   /** 彩色点画的屏幕空间网点叠加强度 0..1（不参与点生成） */
   colorHalftone: number;
+  /**
+   * 彩色点画的饱和度增益（0.5~2.0，默认 1.2）：把色度围绕亮度放大，不动明暗。
+   * 点云渲染整体比原图淡（点缝露纸 + 色调分离），这是对症的干净手段。
+   */
+  colorSaturation: number;
   /** 点画强度 0..1（图像模式 = 屏幕空间 stipple 的墨量上限） */
   stipple: number;
   /** 图像模式的点画网点尺度（像素，2~10）：blue noise 打连续图像，不会摩尔纹 */
@@ -162,8 +167,9 @@ const DEFAULTS = {
   parallaxMode: true,
   parallaxAmount: 4,
   colorMode: 1,
-  colorPosterize: 10,
+  colorPosterize: 5,
   colorHalftone: 0,
+  colorSaturation: 1.2,
   renderMode: 'cloud', // 产品路径 = 点云；图像模式只做对照
   inkSource: 1,
   inkPolarity: 0,
@@ -184,7 +190,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
     label: '彩色点画',
     params: {
       ...DEFAULTS,
-      pointSize: 2.6,
+      pointSize: 3, // 最终配方（加载点云时仍会被自适应取景重算）
       // 软边在这里是**用来填点缝、提高饱和度的**，不是柔化：硬边会让点缝全露纸色 → 反而更淡。
       softness: 0.25,
       density: 1.0,
@@ -206,8 +212,9 @@ export const PRESETS: Record<PresetKey, Preset> = {
       boil: false,
       paper: '#ffffff', // 纯白纸：暖纸色会吃掉颜色饱和度
       colorMode: 1,
-      colorPosterize: 10,
+      colorPosterize: 5,
       colorHalftone: 0,
+      colorSaturation: 1.2,
     },
   },
   'stipple-print': {

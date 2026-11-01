@@ -190,6 +190,7 @@ interface CompositeUniforms {
   uColorMode: NumericUniform;
   uColorPosterize: NumericUniform;
   uColorHalftone: NumericUniform;
+  uColorSaturation: NumericUniform;
   uColorCell: NumericUniform;
   uColorAngle: NumericUniform;
   tPaperNoise: THREE.IUniform<THREE.Texture | null>;
@@ -484,6 +485,7 @@ export class Viewer {
       uColorMode: { value: this.params.colorMode },
       uColorPosterize: { value: this.params.colorPosterize },
       uColorHalftone: { value: this.params.colorHalftone },
+      uColorSaturation: { value: this.params.colorSaturation },
       uColorCell: { value: this.params.halftoneCell },
       uColorAngle: { value: THREE.MathUtils.degToRad(this.params.halftoneAngle) },
       tPaperNoise: { value: blueNoise },
@@ -1202,6 +1204,7 @@ export class Viewer {
     this.compositeUniforms.uColorMode.value = colorMode ? 1 : 0;
     this.compositeUniforms.uColorPosterize.value = p.colorPosterize;
     this.compositeUniforms.uColorHalftone.value = p.colorHalftone;
+    this.compositeUniforms.uColorSaturation.value = p.colorSaturation;
     this.compositeUniforms.uColorCell.value = p.halftoneCell;
     this.compositeUniforms.uColorAngle.value = THREE.MathUtils.degToRad(p.halftoneAngle);
 

@@ -29,6 +29,7 @@ uniform float uBoilFlicker; // 沸腾：阈值抖动 0..1
 uniform float uColorMode; // 1 = 彩色点画路径
 uniform float uColorPosterize; // 色调分离级数（0/1 = 不分离）
 uniform float uColorHalftone; // 屏幕空间网点叠加强度
+uniform float uColorSaturation; // 饱和度增益（围绕亮度放大色度，不动明暗）
 uniform float uColorCell; // 网点 cell 像素
 uniform float uColorAngle; // 网点角度（弧度）
 uniform sampler2D tPaperNoise; // 复用 blue noise 当纸纹
@@ -58,6 +59,11 @@ vec3 printify(vec3 src) {
     col = col * (lq / max(lum, 0.02));
     col = clamp(col, 0.0, 1.0);
   }
+  // 1.5) 饱和度增益：把色度围绕亮度放大（不动明暗）
+  //      点云渲染整体比原图淡（点缝露纸 + 色调分离），这是对症的干净补偿。
+  float lumSat = clamp(dot(col, LUMA), 0.0, 1.0);
+  col = clamp(mix(vec3(lumSat), col, uColorSaturation), 0.0, 1.0);
+
   // 2) 屏幕空间网点：暗部叠墨点多一些，亮部留白 → 印刷的调子层
   float lum = clamp(dot(col, LUMA), 0.0, 1.0);
   vec2 shifted = gl_FragCoord.xy + uBoilJitter * 4.0;

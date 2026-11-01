@@ -140,6 +140,21 @@ npm run gen:noise  # 重新生成 src/assets/blue-noise.png（一次就够，产
 现在默认 **按局部结构**：局部梯度大（线稿/五官/褶皱/头发丝）才上墨，平坦区留纸。
 证据：`web/.shots/89-ink-source-compare.png`（按亮度 → 主次颠倒 / 按局部结构 → 主体回来）。
 
+### 最终配方（实测收敛）
+
+```
+process_res     1008     ← 深度分辨率翻倍，主体边缘从"撕裂锯齿"变顺滑（这才是边缘问题的根因）
+max_points      400,000
+pointSize       3
+softness        0.25     ← 填点缝提饱和度，不是柔化（硬边露缝反而更淡；0.25 附近最浓）
+colorPosterize  5        ← 只量化亮度；压低档位不再牺牲脸
+colorHalftone   0
+colorSaturation 1.2      ← 饱和度增益（1.0 → 1.2 实测背景 0.210→0.243、整体 0.091→0.106）
+paper           #ffffff
+edgeStrength    0
+```
+
+对比：`web/.shots/02-posterize-ab.png`（RGB vs 亮度量化）、`03-saturation-ab.png`（1.0 vs 1.2）。
 ### posterize 只量化亮度（保住色相/饱和度）
 
 原先的色调分离是**逐 RGB 通道各自量化**：三个通道被分别拉到最近档位，色相和饱和度被破坏——

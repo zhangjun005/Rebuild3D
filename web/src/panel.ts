@@ -70,6 +70,7 @@ const SLIDERS: readonly SliderDef[] = [
   { key: 'posterizeLevels', label: '色阶数', min: 3, max: 5, step: 1, digits: 0, visibleWhen: (p) => p.colorMode > 0.5 || p.engraving > 0.001 },
   { key: 'colorPosterize', label: '色调分离级数', min: 2, max: 8, step: 1, digits: 0, visibleWhen: (p) => p.colorMode > 0.5 },
   { key: 'colorHalftone', label: '彩色网点叠加', min: 0, max: 1, step: 0.01, digits: 2, visibleWhen: (p) => p.colorMode > 0.5 },
+  { key: 'colorSaturation', label: '饱和度增益', min: 0.5, max: 2, step: 0.01, digits: 2, visibleWhen: (p) => p.colorMode > 0.5 },
 ];
 
 /** 枚举参数（模式 / 墨量来源 / 主体极性）：下拉框比滑块直观得多 */
