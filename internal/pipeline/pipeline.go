@@ -1,9 +1,13 @@
 // Package pipeline 把"深度图 + 原图"变成可直接下发浏览器的 ILC1 点云。
 //
-// 流程（相机约定见 docs/selection.md §4.4）：
+// 两种采样模式（docs/selection.md §4.4 的相机约定，两种通用）：
 //
-//	深度图 → FilterDepthEdges（消 flying pixels）→ UnprojectPerspective
-//	      → 用原图取色 → VoxelDownsample（控制点数）→ ILC1 编码
+//	depthpixel  1 个深度像素 1 个点（老行为，保留作 A/B 对照）
+//	structure   把深度双线性上采样到工作分辨率后，按**原图结构**（Sobel 梯度）
+//	            加权做确定性分层抽样：点数花在线稿/边缘上，而不是均摊全图
+//
+// HTTP 层默认 structure；`sample_mode=depthpixel` 可回退。
+// 结构模式不做体素下采样（会把刚加密的线稿点合并掉）。
 //
 // 关于深度：DA3MONO 输出的是**相对深度**，不带米制、内参、置信度
 // （见 kron 假设 da3mono-no-confidence-map）。所以：
@@ -23,6 +27,14 @@ import (
 	"illust3d/internal/geometry"
 )
 
+// 采样模式。
+const (
+	// SampleModeDepthPixel 是"1 深度像素 1 点"的老行为，保留作对照与回退。
+	SampleModeDepthPixel = "depthpixel"
+	// SampleModeStructure 是结构感知采样（按原图 Sobel 梯度加权），产品默认。
+	SampleModeStructure = "structure"
+)
+
 // 默认参数。
 const (
 	// DefaultFocalFactor 是默认焦距系数（fx = fy = factor * max(W,H)）。
@@ -33,13 +45,27 @@ const (
 	MinMaxPoints = 1000
 	// MaxMaxPoints 是允许的最大点数上限（浏览器侧的硬上限）。
 	MaxMaxPoints = 5_000_000
+	// DefaultEdgeWeight 是结构模式的默认边缘权重 k（w = 1 + k*Gn）。
+	DefaultEdgeWeight = 6.0
+	// MaxEdgeWeight 是 k 的上限，防止权重无限放大导致其它区域没点。
+	MaxEdgeWeight = 64.0
 	// autoEdgePercentile 是自动边缘阈值取的分位数：相邻深度差超过 p99 的判为遮挡边界。
 	autoEdgePercentile = 0.99
+
+	// WorkResPointFactor 决定结构模式的工作分辨率：长边 ≈ sqrt(max_points*3)。
+	WorkResPointFactor = 3
+	// MinWorkRes / MaxWorkRes 夹住工作分辨率长边（避免太小没细节、太大费时）。
+	MinWorkRes = 256
+	MaxWorkRes = 2048
+	// EdgeRatioThreshold 是判定"强边缘点"的 Gn 阈值（edgePointRatio 指标用）。
+	EdgeRatioThreshold = 0.5
 )
 
 var (
 	// ErrInvalidDepth 表示深度图尺寸/参数非法。
 	ErrInvalidDepth = errors.New("pipeline: 深度图参数非法")
+	// ErrInvalidParams 表示采样参数非法（sample_mode / edge_weight 等）。
+	ErrInvalidParams = errors.New("pipeline: 采样参数非法")
 	// ErrNoPoints 表示过滤/下采样后没有可用点。
 	ErrNoPoints = errors.New("pipeline: 过滤后没有有效点")
 )
@@ -52,9 +78,16 @@ type Params struct {
 	// MaxPoints 是点数上限。0 表示用默认 200000。
 	MaxPoints int
 	// VoxelSize 是体素下采样边长；0 表示自动（按包围盒与 MaxPoints 推）。
+	// structure 模式默认**不做**体素下采样；显式给 >0 时才会应用。
 	VoxelSize float32
 	// EdgeThresh 是 FilterDepthEdges 的绝对深度差阈值；0 表示按深度分位数自动取。
 	EdgeThresh float32
+	// SampleMode 是采样模式："depthpixel" 或 "structure"。
+	// 空值 = depthpixel（保持库层老行为；HTTP API 层默认 structure）。
+	SampleMode string
+	// EdgeWeight 是结构模式的边缘权重 k（w = 1 + k*Gn）。0 表示用默认 6。
+	// k 越大越偏向强边缘（最多 MaxEdgeWeight）。
+	EdgeWeight float64
 }
 
 // Result 是一次点云生成的结果（附带回给前端的元数据）。
@@ -69,7 +102,8 @@ type Result struct {
 	ImageWidth, ImageHeight int
 	// BBoxMin / BBoxMax 是最终点云的包围盒（前端按它取景）。
 	BBoxMin, BBoxMax geometry.Vec3
-	// DroppedPixels 是被边缘过滤/无效深度丢掉的像素数。
+	// DroppedPixels 是 depthpixel 模式下被边缘过滤/无效深度丢掉的像素数；
+	// structure 模式下是工作网格里因深度无效而不可采样的像素数。
 	DroppedPixels int
 	// VoxelSize 是实际使用的体素边长（0 表示没有下采样）。
 	VoxelSize float32
@@ -77,6 +111,12 @@ type Result struct {
 	EdgeThresh float32
 	// Focal 是实际使用的焦距像素值（fx = fy）。
 	Focal float64
+	// SampleMode 是实际使用的采样模式。
+	SampleMode string
+	// WorkRes 是实际采样网格的长边（depthpixel = 深度图长边；structure = 工作分辨率长边）。
+	WorkRes int
+	// EdgePointRatio 是落在强边缘（Gn > 0.5）上的点占比，用于对比两种模式。
+	EdgePointRatio float64
 }
 
 // normalize 补默认值并做范围校验。
@@ -85,7 +125,7 @@ func (p Params) normalize() (Params, error) {
 		p.FocalFactor = DefaultFocalFactor
 	}
 	if math.IsNaN(p.FocalFactor) || math.IsInf(p.FocalFactor, 0) || p.FocalFactor <= 0 {
-		return p, fmt.Errorf("%w: focal_factor=%v 必须 > 0 的有限数", ErrInvalidDepth, p.FocalFactor)
+		return p, fmt.Errorf("%w: focal_factor=%v 必须 > 0 的有限数", ErrInvalidParams, p.FocalFactor)
 	}
 	if p.MaxPoints == 0 {
 		p.MaxPoints = DefaultMaxPoints
@@ -97,10 +137,29 @@ func (p Params) normalize() (Params, error) {
 		p.MaxPoints = MaxMaxPoints
 	}
 	if math.IsNaN(float64(p.VoxelSize)) || math.IsInf(float64(p.VoxelSize), 0) || p.VoxelSize < 0 {
-		return p, fmt.Errorf("%w: voxel_size=%v 必须 >= 0", ErrInvalidDepth, p.VoxelSize)
+		return p, fmt.Errorf("%w: voxel_size=%v 必须 >= 0", ErrInvalidParams, p.VoxelSize)
 	}
 	if math.IsNaN(float64(p.EdgeThresh)) || math.IsInf(float64(p.EdgeThresh), 0) || p.EdgeThresh < 0 {
-		return p, fmt.Errorf("%w: edge_thresh=%v 必须 >= 0", ErrInvalidDepth, p.EdgeThresh)
+		return p, fmt.Errorf("%w: edge_thresh=%v 必须 >= 0", ErrInvalidParams, p.EdgeThresh)
+	}
+	switch p.SampleMode {
+	case "", SampleModeDepthPixel:
+		p.SampleMode = SampleModeDepthPixel
+	case SampleModeStructure:
+	default:
+		return p, fmt.Errorf("%w: sample_mode=%q 只支持 %q / %q",
+			ErrInvalidParams, p.SampleMode, SampleModeDepthPixel, SampleModeStructure)
+	}
+	if p.SampleMode == SampleModeStructure {
+		if p.EdgeWeight == 0 {
+			p.EdgeWeight = DefaultEdgeWeight
+		}
+		if math.IsNaN(p.EdgeWeight) || math.IsInf(p.EdgeWeight, 0) || p.EdgeWeight < 0 {
+			return p, fmt.Errorf("%w: edge_weight=%v 必须 >= 0 的有限数", ErrInvalidParams, p.EdgeWeight)
+		}
+		if p.EdgeWeight > MaxEdgeWeight {
+			p.EdgeWeight = MaxEdgeWeight
+		}
 	}
 	return p, nil
 }
@@ -109,6 +168,8 @@ func (p Params) normalize() (Params, error) {
 //
 // depth 长度必须 >= w*h（下标 = y*w+x）；img 用于给每个点取颜色。
 // 返回的 Result.ILC1 已经是最终字节，可直接作为 HTTP 响应体。
+//
+// 采样模式见 Params.SampleMode；两种模式共用深度边缘剔除与相机约定。
 func Build(depth []float32, w, h int, img image.Image, params Params) (*Result, error) {
 	p, err := params.normalize()
 	if err != nil {
@@ -121,7 +182,7 @@ func Build(depth []float32, w, h int, img image.Image, params Params) (*Result, 
 		return nil, errors.New("pipeline: 原图为 nil（给点云取色需要原图）")
 	}
 
-	// 1) 边缘剔除：自动阈值取相邻深度差的 p99，超过它的判为遮挡边界。
+	// 1) 深度边缘剔除（消 flying pixels）：两种采样模式共用。
 	thresh := p.EdgeThresh
 	if thresh == 0 {
 		thresh = autoEdgeThresh(depth, w, h)
@@ -131,8 +192,18 @@ func Build(depth []float32, w, h int, img image.Image, params Params) (*Result, 
 		return nil, fmt.Errorf("%w: FilterDepthEdges 参数非法", ErrInvalidDepth)
 	}
 
-	// 2) 反投影：fx = fy = focal_factor * max(W,H)，主点在图像中心。
+	// 2) 相机：fx = fy = focal_factor * max(W,H)，主点在图像中心。
 	focal := p.FocalFactor * float64(maxInt(w, h))
+
+	if p.SampleMode == SampleModeStructure {
+		return buildStructure(depth, w, h, img, p, focal, discard, thresh)
+	}
+	return buildDepthPixel(depth, w, h, img, p, focal, discard, thresh)
+}
+
+// buildDepthPixel 是"1 深度像素 1 点"的路径（保留作 A/B 对照与回退）。
+func buildDepthPixel(depth []float32, w, h int, img image.Image, p Params, focal float64, discard []bool, thresh float32) (*Result, error) {
+	// 2) 反投影：fx = fy = focal_factor * max(W,H)，主点在图像中心。
 	pts := geometry.UnprojectPerspective(depth, w, h, focal, focal, float64(w)/2, float64(h)/2)
 	if pts == nil {
 		return nil, fmt.Errorf("%w: UnprojectPerspective 参数非法", ErrInvalidDepth)
@@ -178,24 +249,35 @@ func Build(depth []float32, w, h int, img image.Image, params Params) (*Result, 
 		return nil, ErrNoPoints
 	}
 
+	// 5) 与 structure 模式对照的指标：最终点里有多少落在原图强边缘上。
+	//    结构图按**深度分辨率**算，再把每个最终点反向投影回像素查 Gn。
+	ratio := 0.0
+	if len(kept) > 0 && focal > 0 {
+		gn := computeStructureMap(img, w, h)
+		ratio = edgeRatioByInverse(kept, w, h, focal, focal, gn)
+	}
+
 	minB, maxB := bbox(kept)
 	data, err := cloud.Encode(cloud.New(kept, cols))
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: 编码 ILC1 失败: %w", err)
 	}
 	return &Result{
-		ILC1:          data,
-		PointCount:    len(kept),
-		DepthWidth:    w,
-		DepthHeight:   h,
-		ImageWidth:    bounds.Dx(),
-		ImageHeight:   bounds.Dy(),
-		BBoxMin:       minB,
-		BBoxMax:       maxB,
-		DroppedPixels: dropped,
-		VoxelSize:     voxel,
-		EdgeThresh:    thresh,
-		Focal:         focal,
+		ILC1:           data,
+		PointCount:     len(kept),
+		DepthWidth:     w,
+		DepthHeight:    h,
+		ImageWidth:     bounds.Dx(),
+		ImageHeight:    bounds.Dy(),
+		BBoxMin:        minB,
+		BBoxMax:        maxB,
+		DroppedPixels:  dropped,
+		VoxelSize:      voxel,
+		EdgeThresh:     thresh,
+		Focal:          focal,
+		SampleMode:     SampleModeDepthPixel,
+		WorkRes:        maxInt(w, h),
+		EdgePointRatio: ratio,
 	}, nil
 }
 

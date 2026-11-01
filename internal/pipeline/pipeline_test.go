@@ -246,10 +246,10 @@ func TestBuildInvalidParams(t *testing.T) {
 		{"nil-image", depth, 2, 2, nil, Params{}, nil},
 		{"short-depth", []float32{1}, 2, 2, img, Params{}, ErrInvalidDepth},
 		{"zero-width", depth, 0, 2, img, Params{}, ErrInvalidDepth},
-		{"focal-negative", depth, 2, 2, img, Params{FocalFactor: -1}, ErrInvalidDepth},
-		{"focal-nan", depth, 2, 2, img, Params{FocalFactor: math.NaN()}, ErrInvalidDepth},
-		{"voxel-negative", depth, 2, 2, img, Params{VoxelSize: -1}, ErrInvalidDepth},
-		{"edge-negative", depth, 2, 2, img, Params{EdgeThresh: -1}, ErrInvalidDepth},
+		{"focal-negative", depth, 2, 2, img, Params{FocalFactor: -1}, ErrInvalidParams},
+		{"focal-nan", depth, 2, 2, img, Params{FocalFactor: math.NaN()}, ErrInvalidParams},
+		{"voxel-negative", depth, 2, 2, img, Params{VoxelSize: -1}, ErrInvalidParams},
+		{"edge-negative", depth, 2, 2, img, Params{EdgeThresh: -1}, ErrInvalidParams},
 		{"all-invalid-depth", []float32{0, 0, -1, float32(math.NaN())}, 2, 2, img, Params{}, ErrNoPoints},
 	}
 	for _, tc := range tests {

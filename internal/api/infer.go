@@ -26,12 +26,15 @@ import (
 //
 //	image         必填，插画文件（标准库可解码的 png/jpeg/gif）
 //	focal_factor  艺术参数，默认 1.0：fx = fy = factor * max(depthW, depthH)
+//	sample_mode   采样模式，默认 structure：depthpixel = 逐深度像素；structure = 结构感知
+//	edge_weight   结构模式的边缘权重 k（w = 1 + k*Gn），默认 6
 //	max_points    点数上限，默认 200000
-//	voxel_size    体素边长，0 = 自动（按包围盒与 max_points 推）
+//	voxel_size    体素边长，默认 0（structure 模式默认不做体素下采样）
 //	edge_thresh   边缘阈值，0 = 按深度分位数自动
 //
 // 响应：application/octet-stream（ILC1 字节），附 X-Ilc1-Pointcount / X-Depth-Width /
-// X-Depth-Height / X-Infer-Ms 等响应头。带 ?format=meta 时改为返回 JSON 元数据。
+// X-Depth-Height / X-Infer-Ms / X-Sample-Mode / X-Work-Res / X-Edge-Point-Ratio 等响应头。
+// 带 ?format=meta 时改为返回 JSON 元数据。
 func (s *Server) handleInfer(w http.ResponseWriter, r *http.Request) {
 	totalStart := time.Now()
 	if s.sidecar == nil {
@@ -143,7 +146,7 @@ func (s *Server) handleInfer(w http.ResponseWriter, r *http.Request) {
 	geoMs := milliseconds(time.Since(geoStart))
 	if err != nil {
 		status := http.StatusUnprocessableEntity
-		if errors.Is(err, pipeline.ErrInvalidDepth) {
+		if errors.Is(err, pipeline.ErrInvalidDepth) || errors.Is(err, pipeline.ErrInvalidParams) {
 			status = http.StatusBadRequest
 		}
 		writeJSON(w, status, map[string]string{"error": err.Error()}, true)
@@ -165,6 +168,9 @@ func (s *Server) handleInfer(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Infer-Ms", strconv.FormatFloat(inferMs, 'f', 1, 64))
 	w.Header().Set("X-Geometry-Ms", strconv.FormatFloat(geoMs, 'f', 1, 64))
 	w.Header().Set("X-Total-Ms", strconv.FormatFloat(totalMs, 'f', 1, 64))
+	w.Header().Set("X-Sample-Mode", res.SampleMode)
+	w.Header().Set("X-Work-Res", strconv.Itoa(res.WorkRes))
+	w.Header().Set("X-Edge-Point-Ratio", strconv.FormatFloat(res.EdgePointRatio, 'f', 4, 64))
 	w.Header().Set("Cache-Control", "no-store")
 	if _, err := w.Write(res.ILC1); err != nil {
 		return // 客户端提前断开，无需上报
@@ -197,10 +203,15 @@ func (s *Server) writeInferError(w http.ResponseWriter, err error) {
 }
 
 // parseInferParams 解析并校验 multipart 文本参数。
+//
+// 注意 API 层默认 sample_mode=structure（产品默认）；pipeline 库层默认 depthpixel
+// 以保持向后兼容，两边都在结果里如实报告实际使用的模式。
 func parseInferParams(form url.Values) (pipeline.Params, error) {
 	p := pipeline.Params{
 		FocalFactor: pipeline.DefaultFocalFactor,
 		MaxPoints:   pipeline.DefaultMaxPoints,
+		SampleMode:  pipeline.SampleModeStructure,
+		EdgeWeight:  pipeline.DefaultEdgeWeight,
 	}
 	if v := form.Get("focal_factor"); v != "" {
 		f, err := strconv.ParseFloat(v, 64)
@@ -235,6 +246,22 @@ func parseInferParams(form url.Values) (pipeline.Params, error) {
 		}
 		p.EdgeThresh = float32(f)
 	}
+	if v := form.Get("sample_mode"); v != "" {
+		switch v {
+		case pipeline.SampleModeStructure, pipeline.SampleModeDepthPixel:
+			p.SampleMode = v
+		default:
+			return p, fmt.Errorf("sample_mode 只支持 %q / %q（当前 %q）",
+				pipeline.SampleModeDepthPixel, pipeline.SampleModeStructure, v)
+		}
+	}
+	if v := form.Get("edge_weight"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f < 0 || math.IsNaN(f) || math.IsInf(f, 0) {
+			return p, fmt.Errorf("edge_weight 必须是非负有限数: %q", v)
+		}
+		p.EdgeWeight = f
+	}
 	return p, nil
 }
 
@@ -268,11 +295,21 @@ type (
 		InferMs       float64   `json:"inferMs"`
 		GeometryMs    float64   `json:"geometryMs"`
 		TotalMs       float64   `json:"totalMs"`
+		// SampleMode / WorkRes / EdgePointRatio 是结构感知采样的关键指标：
+		// edgePointRatio = 落在原图强边缘（Gn>0.5）上的点占比，用于 A/B 对照。
+		SampleMode     string  `json:"sampleMode"`
+		WorkRes        int     `json:"workRes"`
+		EdgePointRatio float64 `json:"edgePointRatio"`
+		EdgeWeight     float64 `json:"edgeWeight"`
 	}
 )
 
 // newInferMeta 组装返回给前端的点云元数据。
 func newInferMeta(res *pipeline.Result, params pipeline.Params, processRes int, format string, imgBytes int, inferMs, geoMs, totalMs float64) inferMeta {
+	edgeWeight := params.EdgeWeight
+	if res.SampleMode != pipeline.SampleModeStructure {
+		edgeWeight = 0 // depthpixel 模式不用 edge_weight，别误导前端
+	}
 	return inferMeta{
 		PointCount: res.PointCount,
 		Depth:      metaSize{Width: res.DepthWidth, Height: res.DepthHeight},
@@ -281,15 +318,19 @@ func newInferMeta(res *pipeline.Result, params pipeline.Params, processRes int, 
 			Min: [3]float64{float64(res.BBoxMin.X), float64(res.BBoxMin.Y), float64(res.BBoxMin.Z)},
 			Max: [3]float64{float64(res.BBoxMax.X), float64(res.BBoxMax.Y), float64(res.BBoxMax.Z)},
 		},
-		DroppedPixels: res.DroppedPixels,
-		VoxelSize:     res.VoxelSize,
-		EdgeThresh:    res.EdgeThresh,
-		Focal:         res.Focal,
-		FocalFactor:   params.FocalFactor,
-		ProcessRes:    processRes,
-		InferMs:       inferMs,
-		GeometryMs:    geoMs,
-		TotalMs:       totalMs,
+		DroppedPixels:  res.DroppedPixels,
+		VoxelSize:      res.VoxelSize,
+		EdgeThresh:     res.EdgeThresh,
+		Focal:          res.Focal,
+		FocalFactor:    params.FocalFactor,
+		ProcessRes:     processRes,
+		InferMs:        inferMs,
+		GeometryMs:     geoMs,
+		TotalMs:        totalMs,
+		SampleMode:     res.SampleMode,
+		WorkRes:        res.WorkRes,
+		EdgePointRatio: res.EdgePointRatio,
+		EdgeWeight:     edgeWeight,
 	}
 }
 

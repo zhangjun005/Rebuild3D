@@ -20,6 +20,7 @@ import (
 	"illust3d/internal/cloud"
 	"illust3d/internal/geometry"
 	"illust3d/internal/infer"
+	"illust3d/internal/pipeline"
 )
 
 // stubSidecar 是 Sidecar 的测试替身（不启进程、不需要 GPU）。
@@ -119,7 +120,8 @@ func TestInferSuccess(t *testing.T) {
 	pngBytes := makePNG(t, 8, 6, color.RGBA{R: 10, G: 20, B: 30, A: 255})
 
 	resp, body := postInfer(t, s.URL+"/api/infer", pngBytes, map[string]string{
-		"edge_thresh": "1000", // 关掉自动阈值，方便断言点数
+		"edge_thresh": "1000",                        // 关掉自动阈值，方便断言点数
+		"sample_mode": pipeline.SampleModeDepthPixel, // 这条测的是旧的逐像素路径
 	})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("状态码 = %d，期望 200（body=%s）", resp.StatusCode, body)
@@ -173,6 +175,7 @@ func TestInferMeta(t *testing.T) {
 	resp, body := postInfer(t, s.URL+"/api/infer?format=meta", pngBytes, map[string]string{
 		"edge_thresh":  "1000",
 		"focal_factor": "2",
+		"sample_mode":  pipeline.SampleModeDepthPixel,
 	})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("状态码 = %d，期望 200（body=%s）", resp.StatusCode, body)
@@ -205,6 +208,85 @@ func TestInferMeta(t *testing.T) {
 	}
 	if meta.InferMs < 0 || meta.GeometryMs < 0 || meta.TotalMs < 0 {
 		t.Errorf("耗时字段为负: %+v", meta)
+	}
+}
+
+// TestInferStructureModeDefault 验证 API 层默认 sample_mode=structure：
+// 点数精确、meta 带 sampleMode/workRes/edgePointRatio、响应头齐全、默认不做体素下采样。
+func TestInferStructureModeDefault(t *testing.T) {
+	side := &stubSidecar{res: tinyDepth()}
+	s := inferServer(t, side, Options{Version: "v-test", ProcessRes: 504})
+	white := makePNG(t, 8, 6, color.RGBA{R: 255, G: 255, B: 255, A: 255})
+
+	// 先看 meta：4×3 深度、max_points=5000 → workRes 长边夹到 256（4:3 → 256×192，
+	// 候选 49152 > 5000，所以应精确取 5000 点）。
+	resp, body := postInfer(t, s.URL+"/api/infer?format=meta", white, map[string]string{
+		"max_points": "5000",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200（body=%s）", resp.StatusCode, body)
+	}
+	var meta inferMeta
+	if err := json.Unmarshal(body, &meta); err != nil {
+		t.Fatalf("解析 meta: %v（body=%s）", err, body)
+	}
+	if meta.SampleMode != pipeline.SampleModeStructure {
+		t.Errorf("默认 sampleMode = %q，期望 %q", meta.SampleMode, pipeline.SampleModeStructure)
+	}
+	if meta.PointCount != 5000 {
+		t.Errorf("pointCount = %d，期望精确 5000", meta.PointCount)
+	}
+	if meta.WorkRes != 256 {
+		t.Errorf("workRes = %d，期望 256（max_points=5000 时夹到下界）", meta.WorkRes)
+	}
+	if meta.VoxelSize != 0 {
+		t.Errorf("structure 模式默认不做体素下采样，voxelSize = %v", meta.VoxelSize)
+	}
+	if meta.EdgeWeight != pipeline.DefaultEdgeWeight {
+		t.Errorf("edgeWeight = %v，期望默认 %v", meta.EdgeWeight, pipeline.DefaultEdgeWeight)
+	}
+	if meta.EdgePointRatio < 0 || meta.EdgePointRatio > 1 {
+		t.Errorf("edgePointRatio = %v，应在 [0,1]", meta.EdgePointRatio)
+	}
+
+	// 再看二进制响应：响应头 + ILC1 长度必须与点数自洽。
+	resp2, bin := postInfer(t, s.URL+"/api/infer", white, map[string]string{"max_points": "5000"})
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200（body=%s）", resp2.StatusCode, bin)
+	}
+	if got := resp2.Header.Get("X-Sample-Mode"); got != pipeline.SampleModeStructure {
+		t.Errorf("X-Sample-Mode = %q", got)
+	}
+	if got := resp2.Header.Get("X-Work-Res"); got != "256" {
+		t.Errorf("X-Work-Res = %q，期望 256", got)
+	}
+	if got := resp2.Header.Get("X-Edge-Point-Ratio"); got == "" {
+		t.Error("缺少 X-Edge-Point-Ratio 响应头")
+	}
+	if len(bin) != 8+15*5000 {
+		t.Errorf("ILC1 字节数 = %d，期望 %d", len(bin), 8+15*5000)
+	}
+	if string(bin[0:4]) != "ILC1" {
+		t.Errorf("magic = %q", bin[0:4])
+	}
+
+	// depthpixel 仍可回退，且 meta 如实报告。
+	_, dpBody := postInfer(t, s.URL+"/api/infer?format=meta", white, map[string]string{
+		"max_points":  "5000",
+		"sample_mode": pipeline.SampleModeDepthPixel,
+	})
+	var dpMeta inferMeta
+	if err := json.Unmarshal(dpBody, &dpMeta); err != nil {
+		t.Fatalf("解析 depthpixel meta: %v", err)
+	}
+	if dpMeta.SampleMode != pipeline.SampleModeDepthPixel {
+		t.Errorf("回退 sampleMode = %q", dpMeta.SampleMode)
+	}
+	if dpMeta.PointCount != 12 {
+		t.Errorf("depthpixel 点数 = %d，期望 12", dpMeta.PointCount)
+	}
+	if dpMeta.WorkRes != 4 {
+		t.Errorf("depthpixel workRes = %d，期望 4（深度长边）", dpMeta.WorkRes)
 	}
 }
 
@@ -263,6 +345,22 @@ func TestInferErrors(t *testing.T) {
 			side:       &stubSidecar{res: tinyDepth()},
 			wantStatus: http.StatusBadRequest,
 			wantSubstr: "voxel_size",
+		},
+		{
+			name:       "bad-sample-mode",
+			image:      validPNG,
+			fields:     map[string]string{"sample_mode": "bogus"},
+			side:       &stubSidecar{res: tinyDepth()},
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "sample_mode",
+		},
+		{
+			name:       "negative-edge-weight",
+			image:      validPNG,
+			fields:     map[string]string{"edge_weight": "-2"},
+			side:       &stubSidecar{res: tinyDepth()},
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "edge_weight",
 		},
 		{
 			name:       "sidecar-remote-error",
