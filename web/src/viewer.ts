@@ -32,13 +32,29 @@ import { cloneParams, DEFAULT_PRESET, PRESETS, type PresetKey, type RenderParams
 // 全链路显示空间（理由见文件头）
 THREE.ColorManagement.enabled = false;
 
-/** 参考深度：uPointSize 是「这个视距下的像素直径」 */
-const REF_DEPTH = 4.0;
-/** 风格关心的深度区间：同时用于空气透视与描边归一化 */
-const DEPTH_NEAR = 2.5;
-const DEPTH_FAR = 8.0;
+/**
+ * 默认参考深度：uPointSize 是「这个视距下的像素直径」。
+ * 装上点云后会按包围盒重算（真实场景尺度不同，不能写死）。
+ */
+const REF_DEPTH_DEFAULT = 4.0;
+/** 风格关心的深度区间：同时用于空气透视与描边归一化。装上点云后按取景距离重算 */
+const DEPTH_NEAR_DEFAULT = 2.5;
+const DEPTH_FAR_DEFAULT = 8.0;
 /** 深度 pass 把点放大的系数（封住点间隙，避免描边被点阵打碎） */
 const DEPTH_POINT_GROW = 4.0;
+
+/** 取景：核心半径取「到中心距离的 75 分位」，避免大片地面/背景点把相机拉飞 */
+const FRAME_RADIUS_PERCENTILE = 0.75;
+/**
+ * 取景留边。0.9 = 核心半径略微溢出画面：主体占满画面（75 分位半径已经剔除了
+ * 地面/背景点的长尾，所以轻微溢出不会切到主体）。
+ */
+const FRAME_MARGIN = 0.9;
+/** 点大小自适应：点径 ≈ 屏幕点间距 × 这个系数（0.5 → 相邻点略微交叠） */
+const POINT_SIZE_PER_SPACING = 0.5;
+/** 自适应点大小的上下限（CSS 像素） */
+const POINT_SIZE_MIN = 1.2;
+const POINT_SIZE_MAX = 8.0;
 
 /** 沸腾：一个可回绕循环的「逻辑帧」数（60 fps 下 0.8 s） */
 const BOIL_CYCLE_FRAMES = 48;
@@ -60,6 +76,12 @@ export interface ViewerStats {
   boilPhase: number;
   width: number;
   height: number;
+  /** 取景：相机到核心中心的距离 */
+  cameraDistance: number;
+  /** 取景：核心半径（75 分位） */
+  coreRadius: number;
+  /** 当前点大小（CSS px @ 参考深度） */
+  pointSize: number;
 }
 
 type NumericUniform = THREE.IUniform<number>;
@@ -182,6 +204,15 @@ export class Viewer {
   private boilPhase = 0;
   private disposed = false;
 
+  // ── 随点云变化的取景 / 深度参数（真实点云尺度不同，不能写死）──
+  /** 点大小换算用的参考视距（uPointSize 是"这个距离下的像素直径"） */
+  private refDepth = REF_DEPTH_DEFAULT;
+  /** 空气透视与描边归一化用的深度区间 */
+  private depthNear = DEPTH_NEAR_DEFAULT;
+  private depthFar = DEPTH_FAR_DEFAULT;
+  /** 上次取景信息（HUD / 调试用） */
+  private frameInfo: { center: THREE.Vector3; radius: number; distance: number } | null = null;
+
   constructor(canvas: HTMLCanvasElement, blueNoise: THREE.Texture) {
     this.params = cloneParams(PRESETS[DEFAULT_PRESET].params);
     this.paperColor.set(this.params.paper);
@@ -222,11 +253,11 @@ export class Viewer {
     // ── uniforms（先建对象，material 和 applyParams 共用同一份引用）──
     this.pointUniforms = {
       uPointSize: { value: this.params.pointSize },
-      uScale: { value: REF_DEPTH },
+      uScale: { value: REF_DEPTH_DEFAULT },
       uMinSize: { value: 1.0 },
       uMaxSize: { value: 255.0 },
-      uFogNear: { value: DEPTH_NEAR },
-      uFogFar: { value: DEPTH_FAR },
+      uFogNear: { value: DEPTH_NEAR_DEFAULT },
+      uFogFar: { value: DEPTH_FAR_DEFAULT },
       uDensity: { value: this.params.density },
       uPaper: { value: this.paperColor },
       uInk: { value: this.inkColor },
@@ -242,8 +273,8 @@ export class Viewer {
       uPointSize: this.pointUniforms.uPointSize,
       uScale: this.pointUniforms.uScale,
       uGrow: { value: DEPTH_POINT_GROW },
-      uDepthNear: { value: DEPTH_NEAR },
-      uDepthFar: { value: DEPTH_FAR },
+      uDepthNear: { value: DEPTH_NEAR_DEFAULT },
+      uDepthFar: { value: DEPTH_FAR_DEFAULT },
     };
 
     this.smoothUniforms = {
@@ -317,8 +348,10 @@ export class Viewer {
   }
 
   // ── 数据 ────────────────────────────────────────────────────────────────
-  /** 挂上点云（BufferGeometry 零拷贝引用 ILC1 的视图） */
+  /** 挂上点云（BufferGeometry 零拷贝引用 ILC1 的视图），并按包围盒自适应取景 */
   setCloud(cloud: IlcCloud, source?: string): void {
+    if (cloud.count <= 0) throw new Error('点云是空的（count = 0）');
+
     if (this.colorPoints) {
       this.scene.remove(this.colorPoints);
       this.colorPoints.geometry.dispose();
@@ -328,9 +361,11 @@ export class Viewer {
     }
 
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(cloud.positions, 3));
+    const position = new THREE.BufferAttribute(cloud.positions, 3);
+    geometry.setAttribute('position', position);
     // u8 归一化属性：shader 里 aColor 直接是 0..1
     geometry.setAttribute('aColor', new THREE.BufferAttribute(cloud.colors, 3, true));
+    geometry.computeBoundingBox();
     geometry.computeBoundingSphere();
 
     this.colorPoints = new THREE.Points(geometry, this.pointMaterial);
@@ -339,7 +374,103 @@ export class Viewer {
 
     this.scene.add(this.colorPoints, this.depthPoints);
 
+    this.frameCloud(geometry, position);
+
     if (source !== undefined) this.onSource?.(source);
+  }
+
+  /**
+   * 按点云的包围盒做自适应取景 + 自适应尺度参数。
+   *
+   * 真实点云（单图深度估计）的尺度、位置、朝向、点数都和测试点云不一样，
+   * 所以这些量一个都不能写死：
+   *   - 相机距离 / 目标点 → 由「核心半径」决定（75 分位，不让大片地面/背景把相机拉飞）
+   *   - uPointSize 的参考视距 refDepth → 跟着取景距离走，换尺度后点的屏幕大小不变
+   *   - 空气透视 / 描边归一化的深度区间 → 同上
+   *   - 点大小 → 由估算的「屏幕点间距」决定，点数变少时点自动变大，覆盖率不塌
+   */
+  private frameCloud(geometry: THREE.BufferGeometry, position: THREE.BufferAttribute): void {
+    const count = position.count;
+    const box = geometry.boundingBox ?? new THREE.Box3().setFromBufferAttribute(position);
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
+    const diagonal = Math.max(size.length(), 1e-6);
+
+    // 核心半径：到中心距离的 75 分位（稳健，不被少数离群点/地面拉飞）
+    const radius = Math.max(this.percentileRadius(position, center, FRAME_RADIUS_PERCENTILE), 1e-6);
+
+    const fovRad = THREE.MathUtils.degToRad(this.camera.fov);
+    const fitDistance = (radius / Math.sin(fovRad / 2)) * FRAME_MARGIN;
+
+    // 相机方向保持 3/4 俯视（艺术取景，不是自动寻找最佳视角）
+    const dir = new THREE.Vector3(0.34, 0.36, 0.87).normalize();
+    this.controls.target.copy(center);
+    this.camera.position.copy(center).addScaledVector(dir, fitDistance);
+    this.camera.near = Math.max(fitDistance * 0.005, 1e-5);
+    this.camera.far = fitDistance * 12 + diagonal * 2;
+    this.camera.updateProjectionMatrix();
+
+    this.controls.minDistance = radius * 0.25;
+    this.controls.maxDistance = fitDistance * 6;
+    this.controls.maxPolarAngle = Math.PI * 0.492;
+    this.controls.update();
+
+    this.frameInfo = { center: center.clone(), radius, distance: fitDistance };
+
+    // 尺度相关参数：换尺度后观感保持一致
+    this.refDepth = fitDistance * 0.91;
+    this.depthNear = fitDistance * 0.57;
+    this.depthFar = fitDistance * 1.82;
+    this.applyDepthRange();
+
+    // 点大小自适应：点云来自深度图，基本是 2.5D 面 → 间距 ≈ 对角线 / sqrt(点数)
+    const spacingWorld = diagonal / Math.sqrt(count);
+    const cssHeight = Math.max(window.innerHeight, 1);
+    const pxPerWorldAtRef = (cssHeight * 0.5) / Math.tan(fovRad / 2) / this.refDepth;
+    const spacingPx = spacingWorld * pxPerWorldAtRef;
+    const autoPointSize = THREE.MathUtils.clamp(
+      spacingPx * POINT_SIZE_PER_SPACING,
+      POINT_SIZE_MIN,
+      POINT_SIZE_MAX,
+    );
+    this.params.pointSize = autoPointSize;
+    this.applyParams();
+  }
+
+  /** 到 center 距离的第 p 分位（抽样计算，够用且快） */
+  private percentileRadius(
+    position: THREE.BufferAttribute,
+    center: THREE.Vector3,
+    p: number,
+  ): number {
+    const count = position.count;
+    const stride = Math.max(1, Math.floor(count / 20000));
+    const samples: number[] = [];
+    for (let i = 0; i < count; i += stride) {
+      const dx = position.getX(i) - center.x;
+      const dy = position.getY(i) - center.y;
+      const dz = position.getZ(i) - center.z;
+      samples.push(Math.sqrt(dx * dx + dy * dy + dz * dz));
+    }
+    if (samples.length === 0) return 1;
+    samples.sort((a, b) => a - b);
+    const index = Math.min(samples.length - 1, Math.max(0, Math.floor(samples.length * p)));
+    return samples[index] as number;
+  }
+
+  /** 把 refDepth / 深度区间刷到 uniform 上（dpr 变化时也要调） */
+  private applyDepthRange(): void {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    this.pointUniforms.uScale.value = this.refDepth * dpr;
+    this.pointUniforms.uFogNear.value = this.depthNear;
+    this.pointUniforms.uFogFar.value = this.depthFar;
+    this.depthUniforms.uDepthNear.value = this.depthNear;
+    this.depthUniforms.uDepthFar.value = this.depthFar;
+  }
+
+  /** 当前取景信息（HUD / 自动化用） */
+  get framing(): { center: THREE.Vector3; radius: number; distance: number } | null {
+    return this.frameInfo;
   }
 
   // ── 参数 ────────────────────────────────────────────────────────────────
@@ -434,7 +565,7 @@ export class Viewer {
     this.compositeUniforms.uTexel.value.set(1 / w, 1 / h);
 
     // 点大小的换算：uPointSize 是「参考深度处的 CSS 像素」，乘 dpr 换到设备像素
-    this.pointUniforms.uScale.value = REF_DEPTH * dpr;
+    this.applyDepthRange();
 
     // 分辨率变了要重画一帧，否则会看到旧画面
     if (this.rafId !== 0) this.renderFrame();
@@ -568,6 +699,9 @@ export class Viewer {
       boilPhase: this.boilPhase,
       width: Math.floor(size.x),
       height: Math.floor(size.y),
+      cameraDistance: this.frameInfo?.distance ?? 0,
+      coreRadius: this.frameInfo?.radius ?? 0,
+      pointSize: this.params.pointSize,
     };
   }
 
@@ -606,6 +740,8 @@ export interface Illust3dDebug {
   stats: () => ViewerStats;
   /** 外部脚本直接改 viewer.params 之后，用它把面板控件刷到当前值 */
   syncPanel?: () => void;
+  /** 换一份 ILC1 点云（真实深度点云 / 自动化测试用），返回点数 */
+  loadILC1?: (buffer: ArrayBuffer, label?: string) => number;
 }
 
 declare global {

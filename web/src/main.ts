@@ -11,7 +11,7 @@
 import * as THREE from 'three';
 
 import noiseUrl from './assets/blue-noise.png?url';
-import { loadSampleCloud } from './ilcl';
+import { loadSampleCloud, parseIlcl } from './ilcl';
 import { Panel } from './panel';
 import { DEFAULT_PRESET } from './params';
 import { configureBlueNoiseTexture, Viewer } from './viewer';
@@ -70,10 +70,30 @@ async function boot(): Promise<void> {
   const { cloud, source } = await loadSampleCloud();
   viewer.setCloud(cloud, source);
   panel.setSource(source);
+  panel.sync(); // setCloud 会按包围盒/点数自适应点大小，面板要跟上
 
   // 5) 跑起来
   viewer.start();
-  window.illust3d = { viewer, stats: () => viewer.stats(), syncPanel: () => panel.sync() };
+
+  /**
+   * 换一份点云（真实深度点云接进来时走这里；也方便用控制台/自动化喂数据）。
+   * 自适应取景、点大小、空气透视深度区间都在 Viewer.setCloud 里按新包围盒重算。
+   */
+  const loadILC1 = (buffer: ArrayBuffer, label = '内存中的 ILC1'): number => {
+    const next = parseIlcl(buffer);
+    viewer.setCloud(next, label);
+    panel.setSource(label);
+    panel.sync();
+    console.info(`[illust3d] 已切换到 ${label} · ${next.count.toLocaleString('en-US')} 点`);
+    return next.count;
+  };
+
+  window.illust3d = {
+    viewer,
+    stats: () => viewer.stats(),
+    syncPanel: () => panel.sync(),
+    loadILC1,
+  };
 
   console.info(
     `[illust3d] 点画印刷 ready · ${cloud.count.toLocaleString('en-US')} 点 · ` +

@@ -35,10 +35,35 @@ npm run gen:noise  # 重新生成 src/assets/blue-noise.png（一次就够，产
 调试入口（控制台 / 自动化）：
 
 ```js
-window.illust3d.stats()      // { fps, frame, points, drawCalls, boilPhase, width, height }
-window.illust3d.viewer       // Viewer 实例
+window.illust3d.stats()       // { fps, frame, points, drawCalls, boilPhase, width, height,
+                              //   cameraDistance, coreRadius, pointSize }
+window.illust3d.viewer        // Viewer 实例
 window.illust3d.syncPanel?.() // 直接改 viewer.params 后刷新面板显示
+window.illust3d.loadILC1?(buf, 'label') // 换一份 ILC1 点云（真实深度点云/测试用），返回点数
 ```
+
+## 自适应（真实点云不等于测试点云）
+
+`Viewer.setCloud()` 会按新点云重算所有和尺度相关的量，**不写死任何场景常量**：
+
+| 量 | 怎么定 |
+|---|---|
+| 相机目标点 | 包围盒中心 |
+| 相机距离 | `核心半径 / sin(fov/2) × 0.9`；核心半径 = 到中心距离的 **75 分位**（不被大片地面/背景点的长尾拉飞） |
+| 相机 near / far | 由取景距离推 |
+| `uPointSize` 的参考视距 `refDepth` | `取景距离 × 0.91` → 换尺度后点的屏幕大小不变 |
+| 空气透视 / 描边归一化深度区间 | `refDepth` 的 0.57 / 1.82 倍 |
+| 点大小 | 估算屏幕点间距：`间距 ≈ 对角线 / sqrt(点数)` → `点大小 ≈ 间距 × 0.5`（clamp 1.2~8 px） |
+| 深度 pass 的点放大 | 固定 4×（点大小已随间距自适应，所以覆盖率不塌） |
+
+实测（`web/.shots/12~15-adaptive-*.png`）：
+
+| 输入 | 点数 | 核心半径 | 相机距离 | 自适应点大小 |
+|---|---|---|---|---|
+| 原始 | 118,401 | 1.98 | 4.97 | 2.49 |
+| 均匀抽稀 | 59,200 | 1.98 | 4.97 | 3.53（×1.41） |
+| 再抽稀 | 19,733 | 1.98 | 4.97 | 6.09（×2.44） |
+| 尺度 ×5 + 平移 | 118,401 | 9.90 | 24.87（×5） | 2.49（不变） |
 
 ## 目录
 
@@ -108,3 +133,8 @@ web/
   预设除「点画印刷」外只做了「线描 / 原色调试」两个调试档。
 - `gl_PointSize` 上限驱动相关（§9），已 clamp 到 255，大点时应该改 quad 基元。
 - 逐点抖动在极低密度下会有轻微团簇（点云本身是规则点阵时更明显），真实深度点云不会。
+  注意：把测试点云做「隔 N 取一」抽稀会保留 Fibonacci 子点阵，屏幕上会看到梳状条纹
+  （`web/.shots/14-adaptive-20k.png`）——这是合成数据的规则性，不是渲染器问题。
+- 掠射面（几乎侧视的窄面）墨点偏密：密度只看亮度，没算法线·视线的掠射因子。已知，待定。
+- 点云里真实的空洞（置信度过滤造成）目前靠深度 pass 的 4× 放大 + 5×5 填洞兜住；
+  空洞很大时描边会在洞边画出假轮廓，后续可以按「邻域覆盖度」抑制。
