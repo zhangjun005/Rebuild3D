@@ -45,11 +45,11 @@ export class GenSection {
     twoCol.className = 'grid2';
     twoCol.append(
       this.slider('焦距系数', 'focalFactor', {
-        min: 0.4,
-        max: 2.5,
+        min: 0.1,
+        max: 3.0,
         step: 0.05,
         digits: 2,
-        hint: '小=广角（更厚/立体感强）· 大=长焦（更薄/像浮雕）',
+        hint: '小 = 广角（点云更宽更扁）· 大 = 长焦（更立体、更紧凑）',
       }),
       this.slider('边缘阈值', 'edgeThresh', {
         min: 0,
@@ -60,6 +60,12 @@ export class GenSection {
       }),
     );
     root.append(twoCol);
+
+    // 方向提示（避免用户把"焦距"误解为聚焦/清晰度）
+    const focalHint = document.createElement('div');
+    focalHint.className = 'gen-hint';
+    focalHint.textContent = '焦距系数：小 = 广角（点云更宽更扁）· 大 = 长焦（更立体、更紧凑）';
+    root.append(focalHint);
 
     // 点数档位
     const tierRow = document.createElement('div');

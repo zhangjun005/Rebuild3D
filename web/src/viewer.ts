@@ -658,15 +658,27 @@ export class Viewer {
   /**
    * 挂上点云（BufferGeometry 零拷贝引用 ILC1 的视图），并按包围盒自适应取景。
    *
-   * preserveOrientation：重新生成点云时保留用户**当前的旋转角度**（不强制回正）。
-   * 距离会重新按新包围盒适配（焦距变化会改变点云厚度，距离必须重算）。
+   * - `preserveOrientation`：重新生成点云时保留用户**当前的旋转角度**（不强制回正）。
+   * - `preserveDistance`：**连相机距离也保留**。
+   *   焦距（focal_factor）只放大点云的 x/y，z 不变；如果按新包围盒重新取景，
+   *   x/y 放大多少相机就退多远，正好抵消 → 焦距看起来"改了没反应"。
+   *   保留距离后：焦距调小 → 点云明显变大/变宽；调大 → 变小更紧凑（这才是"镜头"的手感）。
+   *   想重新适配画面时点「回正」——resetView 用 frameInfo.distance 重新取景。
    */
-  setCloud(cloud: IlcCloud, source?: string, options: { preserveOrientation?: boolean } = {}): void {
+  setCloud(
+    cloud: IlcCloud,
+    source?: string,
+    options: { preserveOrientation?: boolean; preserveDistance?: boolean } = {},
+  ): void {
     if (cloud.count <= 0) throw new Error('点云是空的（count = 0）');
 
-    // 记住当前视线方向（相机相对 pivot 的单位向量），取景后按新距离复原
+    // 记住当前视线方向（相机相对 pivot 的单位向量），取景后复原
     const previousDirection = options.preserveOrientation
       ? this.camera.position.clone().sub(this.controls.target).normalize()
+      : null;
+    // 旧距离：preserveDistance 时用来顶掉"按新包围盒重新适配"的那个距离
+    const previousDistance = options.preserveDistance
+      ? this.camera.position.distanceTo(this.controls.target)
       : null;
 
     if (this.colorPoints) {
@@ -695,10 +707,18 @@ export class Viewer {
 
     this.frameCloud(geometry, position);
 
-    // 重新生成时保留旋转角度：沿原视线方向、用新适配距离重新摆相机
-    if (previousDirection) {
-      const distance = this.frameInfo?.distance ?? 1;
-      this.camera.position.copy(this.controls.target).addScaledVector(previousDirection, distance);
+    // 重新生成时保留旋转角度（和可选的旧距离）：沿原视线方向重新摆相机
+    if (previousDirection || previousDistance !== null) {
+      const direction =
+        previousDirection ?? this.camera.position.clone().sub(this.controls.target).normalize();
+      const distance = previousDistance ?? (this.frameInfo?.distance ?? 1);
+      // 焦距变小后包围盒会很大，frameCloud 设的 minDistance 可能 > 旧距离，
+      // controls.update() 会把相机硬拉远（= 又把"变大"抵消掉）→ 这里先放宽范围
+      if (previousDistance !== null) {
+        this.controls.minDistance = Math.min(this.controls.minDistance, previousDistance * 0.5);
+        this.controls.maxDistance = Math.max(this.controls.maxDistance, previousDistance * 2);
+      }
+      this.camera.position.copy(this.controls.target).addScaledVector(direction, distance);
       this.camera.lookAt(this.controls.target);
       this.controls.update();
       this.captureParallaxBase();

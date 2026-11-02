@@ -299,6 +299,8 @@ async function boot(): Promise<void> {
   /** 最近一次点云生成结果（模式来回切换时用来重建状态栏） */
   let lastCloudMetrics: { pointCount: number; depthWidth: number; depthHeight: number; inferMs: number; geometryMs: number; totalMs: number; bytes: number } | null = null;
   let lastMode: 'cloud' | 'image' = viewer.params.renderMode;
+  /** 上一份点云生成时用的焦距（判断焦距是否变了 → 变了就保留相机距离） */
+  let lastGeneratedFocal: number | null = null;
 
   /** 点云就绪状态栏（点数是用户判断"生成了没有"的唯一依据） */
   function cloudReadyStatus(): string {
@@ -349,16 +351,27 @@ async function boot(): Promise<void> {
       );
       const result = await inferIllustration(file, genInferOptions(file));
       panel.setInputStatus(`生成点云…（${result.metrics.pointCount.toLocaleString('en-US')} 点）`);
-      viewer.setCloud(result.cloud, `${file.name} · ${result.metrics.pointCount.toLocaleString('en-US')} 点`, {
-        preserveOrientation: true,
-      });
+      // 焦距变化时**保留相机距离**：否则按新包围盒重新取景会把"变宽"正好抵消，
+      // 看起来像"改了没反应"。想重新适配画面点「回正」。
+      const focalChanged =
+        lastGeneratedFocal !== null && Math.abs(genParams.focalFactor - lastGeneratedFocal) > 1e-9;
+      viewer.setCloud(
+        result.cloud,
+        `${file.name} · ${result.metrics.pointCount.toLocaleString('en-US')} 点`,
+        { preserveOrientation: true, preserveDistance: focalChanged },
+      );
+      lastGeneratedFocal = genParams.focalFactor;
       panel.setSource(`${file.name} · ${result.metrics.pointCount.toLocaleString('en-US')} 点`);
       panel.sync();
       viewer.params.renderMode = 'cloud';
       cloudForFile = file;
       const m = result.metrics;
       lastCloudMetrics = { ...m, bytes: result.buffer.byteLength };
-      panel.setInputStatus(cloudReadyStatus() + pointShortfallNote(genParams.maxPoints, m.pointCount));
+      panel.setInputStatus(
+        cloudReadyStatus() +
+          pointShortfallNote(genParams.maxPoints, m.pointCount) +
+          (focalChanged ? '\n已保留视角（焦距只改变画面比例）；想重新取景请点「回正」' : ''),
+      );
       panel.markGenApplied();
       console.info('[illust3d] 重新生成完成', m);
     } catch (error) {
@@ -422,7 +435,10 @@ async function boot(): Promise<void> {
       }
       const m = result.metrics;
       lastCloudMetrics = { ...m, bytes: result.buffer.byteLength };
-      panel.setInputStatus(cloudReadyStatus());
+      lastGeneratedFocal = genParams.focalFactor;
+      panel.setGenEnabled(true);
+      panel.markGenApplied();
+      panel.setInputStatus(cloudReadyStatus() + pointShortfallNote(genParams.maxPoints, m.pointCount));
       // 顺带把原图装好：用户想切「图像模式（对照）」时不用再等
       void ensureImage(file)
         .then(() => panel.setImageSource(file.name))
