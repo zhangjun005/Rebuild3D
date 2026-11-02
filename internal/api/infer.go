@@ -236,6 +236,7 @@ func parseInferParams(form url.Values) (pipeline.Params, error) {
 		SampleMode:  pipeline.SampleModeStructure,
 		EdgeWeight:  pipeline.DefaultEdgeWeight,
 		InkWeight:   pipeline.DefaultInkWeight,
+		LayerCount:  pipeline.DefaultLayerCount,
 	}
 	if v := form.Get("focal_factor"); v != "" {
 		f, err := strconv.ParseFloat(v, 64)
@@ -300,6 +301,13 @@ func parseInferParams(form url.Values) (pipeline.Params, error) {
 		}
 		p.WorkRes = n
 	}
+	if v := form.Get("layer_count"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return p, fmt.Errorf("layer_count 必须是非负整数（0=关闭，2~8 有效）: %q", v)
+		}
+		p.LayerCount = n
+	}
 	return p, nil
 }
 
@@ -344,6 +352,11 @@ type (
 		DarkPointRatio float64 `json:"darkPointRatio"`
 		DarkPixelRatio float64 `json:"darkPixelRatio"`
 		DarkEnrichment float64 `json:"darkEnrichment"`
+		// 深度层量化：把连续深度吸附到连通块深度，消除层间"拉丝"散落点。
+		LayerCount      int       `json:"layerCount"`
+		LayerCenters    []float32 `json:"layerCenters,omitempty"`
+		LayerFlattened  int       `json:"layerFlattened"`
+		LayerComponents int       `json:"layerComponents"`
 	}
 )
 
@@ -378,6 +391,11 @@ func newInferMeta(res *pipeline.Result, params pipeline.Params, processRes int, 
 		DarkPointRatio: res.DarkPointRatio,
 		DarkPixelRatio: res.DarkPixelRatio,
 		DarkEnrichment: res.DarkEnrichment,
+
+		LayerCount:      res.LayerCount,
+		LayerCenters:    res.LayerCenters,
+		LayerFlattened:  res.LayerFlattened,
+		LayerComponents: res.LayerComponents,
 	}
 }
 

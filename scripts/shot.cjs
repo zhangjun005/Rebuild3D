@@ -21,6 +21,7 @@
 //                                PowerShell 里安全，例：--param inkSource=depth --param inkPolarity=dark
 //   --clip <x,y,w,h>             只截指定区域
 //   --no-panel                   裁掉右侧面板（约 275px 宽）
+//   --angle <deg>                绕 target 水平旋转指定角度（会先关掉自动运动）
 //
 // 例：
 //   node scripts/shot.cjs http://127.0.0.1:5173/ out/a.png --ilcl out/ab-ink.ilcl --preset engraving --no-panel
@@ -44,6 +45,7 @@ function parseArgs(argv) {
     paramList: [],
     clip: null,
     noPanel: false,
+    angle: 0,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -54,6 +56,7 @@ function parseArgs(argv) {
     else if (a === '--preset') o.preset = argv[++i];
     else if (a === '--params') o.params = JSON.parse(argv[++i]);
     else if (a === '--param') o.paramList.push(argv[++i]);
+    else if (a === '--angle') o.angle = parseFloat(argv[++i]);
     else if (a === '--clip') {
       const [x, y, w, h] = argv[++i].split(',').map(Number);
       o.clip = { x, y, width: w, height: h };
@@ -150,6 +153,28 @@ function parseArgs(argv) {
   }
 
   await page.waitForTimeout(o.wait);
+
+  // 绕 target 水平旋转：用于检查「层间散落点云」在侧视下的表现。
+  // 先关掉自动运动，否则 tick 每帧会用公式覆盖相机位姿。
+  if (o.angle && ready) {
+    await page.evaluate((deg) => {
+      const api = /** @type {any} */ (globalThis).illust3d;
+      const v = api.viewer;
+      v.params.autoSway = false;
+      api.viewer.setParams(api.viewer.params);
+      const t = v.controls.target;
+      const c = v.camera.position;
+      const dx = c.x - t.x;
+      const dz = c.z - t.z;
+      const r = Math.hypot(dx, dz);
+      const a = Math.atan2(dx, dz) + (deg * Math.PI) / 180;
+      c.x = t.x + r * Math.sin(a);
+      c.z = t.z + r * Math.cos(a);
+      v.controls.update();
+    }, o.angle);
+    await page.waitForTimeout(700);
+    console.log('[angle]', o.angle, 'deg');
+  }
 
   if (o.clip) {
     await page.screenshot({ path: o.out, clip: o.clip });

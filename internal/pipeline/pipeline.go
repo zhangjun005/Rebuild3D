@@ -56,6 +56,15 @@ const (
 	// MaxEdgeWeight / MaxInkWeight 是权重上限，防止权重无限放大导致其它区域没点。
 	MaxEdgeWeight = 64.0
 	MaxInkWeight  = 64.0
+	// DefaultLayerCount 是深度层量化的默认层数（0 = 关闭；2~8 有效）。
+	//
+	// 为什么默认开：DA3 在插画上的深度是一条连续分布，主体与背景之间有一条"过渡尾巴"
+	// （实测 100 万点里 16.9% 落在层间且集中在人物周围）。这些点反投影后位于两层之间的
+	// 中间 z，形成"从人物拖向背景的丝状散落点云"。层量化把它们吸附到连通块的深度上。
+	DefaultLayerCount = 3
+	// MinLayerCount / MaxLayerCount 是层数的允许区间。
+	MinLayerCount = 2
+	MaxLayerCount = 8
 	// autoEdgePercentile 是自动边缘阈值取的分位数：相邻深度差超过 p99 的判为遮挡边界。
 	autoEdgePercentile = 0.99
 
@@ -105,6 +114,9 @@ type Params struct {
 	// （clamp(原图长边/2, 512, 2048)），显式值会被夹到 [256, 4096]。
 	// **与 MaxPoints 解耦**：它决定线稿最细能到多少，MaxPoints 只决定保留多少点。
 	WorkRes int
+	// LayerCount 是深度层量化的层数：0 = 关闭（保留老行为），2~8 有效。
+	// 开启后，反投影之前会把深度吸附到「连通块深度中位数」，消除层间中间深度点。
+	LayerCount int
 }
 
 // Result 是一次点云生成的结果（附带回给前端的元数据）。
@@ -141,6 +153,14 @@ type Result struct {
 	// DarkEnrichment = DarkPointRatio / DarkPixelRatio：
 	// 纯均匀采样 = 1.0；结构/墨量采样应显著 > 1（"线稿有没有被点云承载"的核心指标）。
 	DarkEnrichment float64
+	// LayerCount 是深度层量化的实际层数（0 = 未启用）。
+	LayerCount int
+	// LayerCenters 是各层中心（按深度从小到大），仅用于展示/调试。
+	LayerCenters []float32
+	// LayerFlattened 是被吸附到连通块深度中位数的像素数。
+	LayerFlattened int
+	// LayerComponents 是保留下来的连通块数（人物通常是一个）。
+	LayerComponents int
 }
 
 // normalize 补默认值并做范围校验。
@@ -165,6 +185,16 @@ func (p Params) normalize() (Params, error) {
 	}
 	if math.IsNaN(float64(p.EdgeThresh)) || math.IsInf(float64(p.EdgeThresh), 0) || p.EdgeThresh < 0 {
 		return p, fmt.Errorf("%w: edge_thresh=%v 必须 >= 0", ErrInvalidParams, p.EdgeThresh)
+	}
+	// 层数：0 = 关闭；1 视作关闭；超出区间夹取（层数太多没有意义）。
+	if p.LayerCount < 0 {
+		return p, fmt.Errorf("%w: layer_count=%d 必须 >= 0", ErrInvalidParams, p.LayerCount)
+	}
+	if p.LayerCount == 1 {
+		p.LayerCount = 0
+	}
+	if p.LayerCount > MaxLayerCount {
+		p.LayerCount = MaxLayerCount
 	}
 	switch p.SampleMode {
 	case "", SampleModeDepthPixel:
@@ -226,13 +256,33 @@ func Build(depth []float32, w, h int, img image.Image, params Params) (*Result, 
 		return nil, fmt.Errorf("%w: FilterDepthEdges 参数非法", ErrInvalidDepth)
 	}
 
+	// 1.5) 深度层量化（可选）：把连续深度吸附到「连通块的深度中位数」。
+	//
+	// 这一步专治「人物与背景之间拖出一大片散落点云」：DA3 在插画上输出的是连续深度，
+	// 主体与背景之间有一条过渡尾巴，反投影后落在两层之间的中间 z，却在 x/y 上贴着人物
+	// 轮廓，于是形成丝状散落带。量化后层间不再有中间 z，且人物按连通域整体归属，不会被切开。
+	var layerStats LayerQuantizeStats
+	if p.LayerCount >= MinLayerCount {
+		depth, layerStats = quantizeDepthLayers(depth, w, h, discard, p.LayerCount)
+	}
+
 	// 2) 相机：fx = fy = focal_factor * max(W,H)，主点在图像中心。
 	focal := p.FocalFactor * float64(maxInt(w, h))
 
+	var res *Result
 	if p.SampleMode == SampleModeStructure {
-		return buildStructure(depth, w, h, img, p, focal, discard, thresh)
+		res, err = buildStructure(depth, w, h, img, p, focal, discard, thresh)
+	} else {
+		res, err = buildDepthPixel(depth, w, h, img, p, focal, discard, thresh)
 	}
-	return buildDepthPixel(depth, w, h, img, p, focal, discard, thresh)
+	if err != nil {
+		return nil, err
+	}
+	res.LayerCount = layerStats.Layers
+	res.LayerCenters = layerStats.Centers
+	res.LayerFlattened = layerStats.Flattened
+	res.LayerComponents = layerStats.Components
+	return res, nil
 }
 
 // buildDepthPixel 是"1 深度像素 1 点"的路径（保留作 A/B 对照与回退）。
