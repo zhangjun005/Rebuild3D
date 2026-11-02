@@ -975,6 +975,33 @@ export class Viewer {
   }
 
   /**
+   * 设置相机 FOV（越小越接近**正交投影**）。
+   *
+   * 为什么需要：DA3 输出的是相对深度、没有内参，正确做法是正交反投影（x 与深度无关）。
+   * 但若渲染相机是透视的，远层在画面上又被缩小一次，于是整幅图仍呈放射状。
+   * 取景距离 ∝ 1/tan(fov/2)，所以 FOV 越小，跨深度的缩放假象越弱：
+   *   42° → 跨 Δz 的缩放差约 2.1 倍（这就是"扇形"的来源）
+   *    1° → 约 1.5%
+   *
+   * 改完必须重新取景：fitDistance / refDepth / uPointSize 全部依赖 fov。
+   */
+  setCameraFov(deg: number): void {
+    this.camera.fov = THREE.MathUtils.clamp(deg, 0.2, 90);
+    this.params.cameraFov = this.camera.fov;
+    this.camera.updateProjectionMatrix();
+    // 必须**重新套框**（不能保留旧视距）：取景距离 ∝ 1/tan(fov/2)，
+    // FOV 从 42° 降到 1° 时视距要放大 ~40 倍，保留旧距离只会看到一小块。
+    if (this.cloudGeometry && this.cloudPosition) {
+      this.frameCloud(this.cloudGeometry, this.cloudPosition);
+    }
+  }
+
+  /** 当前相机 FOV（度）。 */
+  get cameraFov(): number {
+    return this.camera.fov;
+  }
+
+  /**
    * 把相机放到「相对取景基准的偏移角度」上。
    * 实时摆动与录制捕获共用这一条路径，保证两者观感一致、且都能回绕。
    */
@@ -1289,6 +1316,12 @@ export class Viewer {
 
   private applyParams(): void {
     const p = this.params;
+
+    // 相机 FOV（越小越接近正交）：只在真的变了才重新套框，
+    // 否则拖任何滑块都会把用户转到的视角重置回正面。
+    if (Math.abs(this.camera.fov - p.cameraFov) > 1e-3) {
+      this.setCameraFov(p.cameraFov);
+    }
 
     this.paperColor.set(p.paper);
     this.pointUniforms.uPaper.value = this.paperColor;
@@ -1749,6 +1782,10 @@ export interface Illust3dDebug {
   loadILC1?: (buffer: ArrayBuffer, label?: string) => number;
   /** 导出 PNG（size = null 表示当前视口） */
   exportPng?: (size: { width: number; height: number } | null) => Promise<Blob>;
+  /** 相机 FOV（度）：越小越接近正交投影（42 = 默认透视，1 ≈ 正交） */
+  setCameraFov?: (deg: number) => void;
+  /** 当前相机 FOV（度） */
+  cameraFov?: () => number;
 }
 
 declare global {

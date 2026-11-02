@@ -111,5 +111,115 @@ func UnprojectOrthographic(depth []float32, w, h int, scale, cx, cy float64) []V
 // validDepth 报告深度值是否可用于反投影。
 func validDepth(d float32) bool { return d > 0 && isFinite32(d) }
 
+// UnprojectBlend 是「正交 ↔ 透视」可混合的反投影。
+//
+// Perspective = 0（默认）：纯正交，各深度层都是**与图像平行、等大的平面**，只有 z 不同。
+// 这是插画 2.5D 想要的效果——转动时是层与层错动，而不是以视点为中心的放射状扇形。
+//
+// Perspective = 1：纯透视，等价于 UnprojectPerspective（x/y 随 d 放大 → 放射状）。
+//
+// 中间值在两者之间线性插值。数学上两者对 (u-cx) 都是线性的，所以可以合并成
+//
+//	k = (1-t)·orthoScale + t·(d/f)
+//	x = (u - cx)·k,  y = (cy - v)·k',  z = -d
+//
+// 反解（把点投回像素）也就很简单：u = x/k + cx。
+//
+// orthoScale 一般取 dRef/f（dRef 是代表深度），这样正交与透视在 dRef 处重合，
+// 切换时尺寸连续。
+func UnprojectBlend(depth []float32, w, h int, blend UnprojectBlendParams) []Vec3 {
+	if w <= 0 || h <= 0 || len(depth) < w*h {
+		return nil
+	}
+	if !isFinite64(blend.FX) || !isFinite64(blend.FY) || blend.FX <= 0 || blend.FY <= 0 {
+		return nil
+	}
+	if !isFinite64(blend.OrthoScale) || blend.OrthoScale <= 0 {
+		return nil
+	}
+	t := blend.Perspective
+	if t < 0 {
+		t = 0
+	}
+	if t > 1 {
+		t = 1
+	}
+
+	out := make([]Vec3, w*h)
+	omt := 1 - t
+	for y := 0; y < h; y++ {
+		v := float64(y) + 0.5
+		row := y * w
+		dy := blend.CY - v
+		for x := 0; x < w; x++ {
+			d := depth[row+x]
+			if !validDepth(d) {
+				continue
+			}
+			u := float64(x) + 0.5
+			dx := u - blend.CX
+			dd := float64(d)
+			kx := omt*blend.OrthoScale + t*dd/blend.FX
+			ky := omt*blend.OrthoScale + t*dd/blend.FY
+			out[row+x] = Vec3{
+				X: float32(dx * kx),
+				Y: float32(dy * ky),
+				Z: float32(-blend.RefDepth - (dd-blend.RefDepth)*depthScaleOf(blend)),
+			}
+		}
+	}
+	return out
+}
+
+// UnprojectBlendParams 是 UnprojectBlend 的参数。
+type UnprojectBlendParams struct {
+	// FX / FY 是透视焦距（像素）。
+	FX, FY float64
+	// CX / CY 是主点（像素）。
+	CX, CY float64
+	// OrthoScale 是正交模式下的世界单位/像素（一般取 dRef/焦距）。
+	OrthoScale float64
+	// Perspective 是混合权重：[0,1]，0=正交（层平行），1=透视（放射）。
+	Perspective float64
+	// RefDepth 是纵深压缩的参考深度（一般取深度中位数）。
+	// 压缩以它为基准，保证正面视图不因压缩而整体平移。
+	RefDepth float64
+	// DepthScale 是 z 轴（垂直于图片方向）的压缩系数：
+	//   z = -RefDepth - (d - RefDepth) · DepthScale
+	// DepthScale=1 → z = -d（保持 docs/selection.md §4.4 的约定不变）；
+	// DepthScale=0.3 → 厚度压到三成（更像原图、侧转空洞更小）；
+	// DepthScale=0 → 完全平面（贴在 z = -RefDepth）。
+	DepthScale float64
+}
+
+// depthScaleOf 返回有效的纵深压缩系数（默认 1 = 不压缩；负数按 0 处理）。
+func depthScaleOf(blend UnprojectBlendParams) float64 {
+	if blend.DepthScale < 0 {
+		return 0
+	}
+	if blend.DepthScale == 0 {
+		return 0
+	}
+	return blend.DepthScale
+}
+
+// BlendPixelScale 返回某个深度下「像素 → 世界」的横向比例 k（x/y 共用近似）。
+//
+// 用于把点投回像素（u = x/k + cx），以及把扫描间距换算成世界单位。
+func BlendPixelScale(blend UnprojectBlendParams, d float64, fy bool) float64 {
+	t := blend.Perspective
+	if t < 0 {
+		t = 0
+	}
+	if t > 1 {
+		t = 1
+	}
+	f := blend.FX
+	if fy {
+		f = blend.FY
+	}
+	return (1-t)*blend.OrthoScale + t*d/f
+}
+
 // isFinite64 报告 f 是否有限。
 func isFinite64(f float64) bool { return !math.IsNaN(f) && !math.IsInf(f, 0) }

@@ -47,6 +47,8 @@ interface SelectDef {
 
 /** 顺序即面板顺序：L1 → L2 → L4 */
 const SLIDERS: readonly SliderDef[] = [
+  // 视角 FOV：越小越接近正交投影。插画应取 1~4°；42° 是透视，会让点云呈放射状扇形。
+  { key: 'cameraFov', label: '视角 FOV °', min: 0.5, max: 45, step: 0.5, digits: 1, visibleWhen: (p) => p.renderMode === 'cloud' },
   { key: 'pointSize', label: '点大小', min: 0.5, max: 12, step: 0.1, digits: 1, visibleWhen: (p) => p.renderMode === 'cloud' },
   { key: 'density', label: '点数密度', min: 0.05, max: 1, step: 0.01, digits: 2, visibleWhen: (p) => p.renderMode === 'cloud' },
   { key: 'stippleScale', label: '点画尺度 px', min: 1.5, max: 10, step: 0.1, digits: 1, visibleWhen: (p) => p.renderMode === 'image' && p.halftone <= 0.001 && p.engraving <= 0.001 },

@@ -324,6 +324,7 @@ async function boot(): Promise<void> {
       edgeThresh: genParams.edgeThresh,
       sampleMode: genParams.sampleMode,
       workRes: genParams.workRes,
+      depthScale: genParams.depthScale,
       onPhase: (phase) => panel.setInputStatus(phase),
     };
   }
@@ -518,6 +519,9 @@ async function boot(): Promise<void> {
     loadILC1,
     /** 导出 PNG（自动化里直接拿 Blob，不用点按钮） */
     exportPng: (size: { width: number; height: number } | null) => viewer.exportPng(size),
+    /** 相机 FOV（度）：越小越接近正交投影。42 = 默认透视，1 ≈ 正交 */
+    setCameraFov: (deg: number) => viewer.setCameraFov(deg),
+    cameraFov: () => viewer.cameraFov,
   };
 
   console.info(

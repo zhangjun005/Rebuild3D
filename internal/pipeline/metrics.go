@@ -97,9 +97,10 @@ func darkEnrichmentOf(darkPointRatio, darkPixelRatio float64) float64 {
 }
 
 // darkRatioByInverse 把点云反解回图像像素，统计落在暗像素（<= p20）上的比例。
-// gw/gh 是采样网格（depthpixel 模式 = 深度图尺寸），focalX/focalY 是该网格下的焦距。
-func darkRatioByInverse(pts []geometry.Vec3, gw, gh int, focalX, focalY float64, img image.Image, st darkStats) float64 {
-	if len(pts) == 0 || gw <= 0 || gh <= 0 || focalX == 0 || focalY == 0 || img == nil {
+// gw/gh 是采样网格（depthpixel 模式 = 深度图尺寸）；反解统一走 gridPixelFromPoint，
+// 因此正交/透视两种模式都正确。
+func darkRatioByInverse(pts []geometry.Vec3, proj geometry.UnprojectBlendParams, w, h, gw, gh int, img image.Image, st darkStats) float64 {
+	if len(pts) == 0 || gw <= 0 || gh <= 0 || img == nil {
 		return 0
 	}
 	bounds := img.Bounds()
@@ -108,16 +109,12 @@ func darkRatioByInverse(pts []geometry.Vec3, gw, gh int, focalX, focalY float64,
 		return 0
 	}
 	px := makePixelAt(img)
-	cx := float64(gw) / 2
-	cy := float64(gh) / 2
 	dark := 0
 	for _, p := range pts {
-		dist := -float64(p.Z) // z = -d
-		if dist <= 0 {
+		u, v, ok := gridPixelFromPoint(p, proj, w, h, gw, gh)
+		if !ok {
 			continue
 		}
-		u := float64(p.X)*focalX/dist + cx - 0.5
-		v := cy - float64(p.Y)*focalY/dist - 0.5
 		gx := int(math.Round(u))
 		gy := int(math.Round(v))
 		// 网格像素 → 原图像素（与 sampleColor 同一映射），越界夹到边缘。

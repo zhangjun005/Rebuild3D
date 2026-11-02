@@ -197,6 +197,8 @@ func (s *Server) handleInfer(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Infer-Ms", strconv.FormatFloat(inferMs, 'f', 1, 64))
 	w.Header().Set("X-Geometry-Ms", strconv.FormatFloat(geoMs, 'f', 1, 64))
 	w.Header().Set("X-Total-Ms", strconv.FormatFloat(totalMs, 'f', 1, 64))
+	w.Header().Set("X-Perspective", strconv.FormatFloat(res.Perspective, 'f', 3, 64))
+	w.Header().Set("X-Depth-Scale", strconv.FormatFloat(res.DepthScale, 'f', 3, 64))
 	w.Header().Set("X-Sample-Mode", res.SampleMode)
 	w.Header().Set("X-Work-Res", strconv.Itoa(res.WorkRes))
 	w.Header().Set("X-Edge-Point-Ratio", strconv.FormatFloat(res.EdgePointRatio, 'f', 4, 64))
@@ -266,6 +268,8 @@ func parseInferParams(form url.Values) (pipeline.Params, error) {
 		LayerCount:   pipeline.DefaultLayerCount,
 		BandWidth:    pipeline.DefaultBandWidth,
 		BandCompress: pipeline.DefaultBandCompress,
+		Perspective:  pipeline.DefaultPerspective,
+		DepthScale:   pipeline.DefaultDepthScale,
 	}
 	if v := form.Get("focal_factor"); v != "" {
 		f, err := strconv.ParseFloat(v, 64)
@@ -344,6 +348,27 @@ func parseInferParams(form url.Values) (pipeline.Params, error) {
 		}
 		p.BandCompress = f
 	}
+	if v := form.Get("perspective"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f < 0 || f > 1 || math.IsNaN(f) || math.IsInf(f, 0) {
+			return p, fmt.Errorf("perspective 必须落在 [0,1]（0=正交/层平行，1=透视/放射）: %q", v)
+		}
+		p.Perspective = f
+	}
+	if v := form.Get("depth_scale"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f <= 0 || f > 4 || math.IsNaN(f) || math.IsInf(f, 0) {
+			return p, fmt.Errorf("depth_scale 必须落在 (0,4]（z 轴压缩系数，1=原始，0.2=薄浮雕）: %q", v)
+		}
+		p.DepthScale = f
+	}
+	if v := form.Get("band_flat_thresh"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f < 0 || math.IsNaN(f) || math.IsInf(f, 0) {
+			return p, fmt.Errorf("band_flat_thresh 必须是非负有限数（0=自动）: %q", v)
+		}
+		p.FlatThresh = f
+	}
 	if v := form.Get("layer_count"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {
@@ -407,8 +432,11 @@ type (
 		BandCompress   float64 `json:"bandCompress"`
 		BandPixels     int     `json:"bandPixels"`
 		BandAdjusted   int     `json:"bandAdjusted"`
-		BandCharRatio  float64 `json:"bandCharRatio"`
-		BandBorderFrac float64 `json:"bandBorderFrac"`
+		Perspective    float64 `json:"perspective"`
+		DepthScale     float64 `json:"depthScale"`
+		BandFlatThresh float64 `json:"bandFlatThresh"`
+		BandEdgeThresh float64 `json:"bandEdgeThresh"`
+		BandKeptEdge   int     `json:"bandKeptRealEdge"`
 		// 角色分割（anime-seg，CPU 推理）。SegError 非空 = 分割失败、边界带已退化。
 		SegmentMs float64 `json:"segmentMs"`
 		SegError  string  `json:"segError,omitempty"`
@@ -452,14 +480,17 @@ func newInferMeta(res *pipeline.Result, params pipeline.Params, processRes int, 
 		LayerFlattened:  res.LayerFlattened,
 		LayerComponents: res.LayerComponents,
 
-		BandEnabled:    res.Band.Enabled,
-		BandFallback:   res.Band.Fallback,
-		BandWidth:      res.Band.BandWidth,
-		BandCompress:   res.Band.Compress,
-		BandPixels:     res.Band.BandPixels,
-		BandAdjusted:   res.Band.Adjusted,
-		BandCharRatio:  res.Band.CharRatio,
-		BandBorderFrac: res.Band.BorderFrac,
+		BandEnabled:    res.Seam.Enabled,
+		BandFallback:   res.Seam.Fallback,
+		BandWidth:      res.Seam.BandWidth,
+		BandCompress:   res.Seam.Compress,
+		BandPixels:     res.Seam.BandPixels,
+		BandAdjusted:   res.Seam.Adjusted,
+		Perspective:    res.Perspective,
+		DepthScale:     res.DepthScale,
+		BandFlatThresh: res.Seam.FlatThresh,
+		BandEdgeThresh: res.Seam.EdgeThresh,
+		BandKeptEdge:   res.Seam.KeptRealEdge,
 		SegmentMs:      segMs,
 		SegError:       segError,
 	}

@@ -36,7 +36,7 @@ const (
 //
 // 工作分辨率由原图决定（work_res，0=自动=原图长边/2），与 max_points 解耦；
 // 默认不做体素下采样（会把刚加密到线稿上的点合并掉），显式 voxel_size>0 才做。
-func buildStructure(depth []float32, w, h int, img image.Image, p Params, focal float64, discard []bool, thresh float32) (*Result, error) {
+func buildStructure(depth []float32, w, h int, img image.Image, p Params, focal float64, proj geometry.UnprojectBlendParams, discard []bool, thresh float32) (*Result, error) {
 	bounds := img.Bounds()
 	iw, ih := bounds.Dx(), bounds.Dy()
 	gw, gh := workResFor(p, iw, ih, w, h)
@@ -55,8 +55,6 @@ func buildStructure(depth []float32, w, h int, img image.Image, p Params, focal 
 
 	// 4) 采样点：深度 = 双线性上采样值，颜色 = 原图对应位置的原始像素。
 	boundsPx := makePixelAt(img)
-	worldPerPixelX := float64(w) / focal
-	worldPerPixelY := float64(h) / focal
 	dark := imageDarkStats(img)
 
 	pts := make([]geometry.Vec3, 0, len(sel))
@@ -71,13 +69,16 @@ func buildStructure(depth []float32, w, h int, img image.Image, p Params, focal 
 		if !ok {
 			continue // 候选掩码保证不会发生，防御性跳过
 		}
-		// 与 UnprojectPerspective 等价（把焦距按工作分辨率缩放后代入，z = -d）：
-		//   x = ((wx+0.5)/gw - 0.5) * d * w/focal
-		//   y = (0.5 - (wy+0.5)/gh) * d * h/focal
-		//   z = -d        （d 是距离、越大越远；相机在 +Z 朝 -Z 看）
-		x := ((float64(wx)+0.5)/float64(gw) - 0.5) * float64(d) * worldPerPixelX
-		y := (0.5 - (float64(wy)+0.5)/float64(gh)) * float64(d) * worldPerPixelY
-		pts = append(pts, geometry.Vec3{X: float32(x), Y: float32(y), Z: float32(-float64(d))})
+		// 反投影：先把工作网格坐标换成「原图像素偏移」，再统一乘混合比例 k。
+		//   k = (1-t)·orthoScale + t·d/focal      （t=0 正交 → k 与 d 无关，各层平行）
+		//   x = dxImg·k,  y = dyImg·k,  z = -d
+		dxImg := ((float64(wx)+0.5)/float64(gw) - 0.5) * float64(w)
+		dyImg := (0.5 - (float64(wy)+0.5)/float64(gh)) * float64(h)
+		k := geometry.BlendPixelScale(proj, float64(d), false)
+		x := dxImg * k
+		y := dyImg * k
+		z := -proj.RefDepth - (float64(d)-proj.RefDepth)*proj.DepthScale
+		pts = append(pts, geometry.Vec3{X: float32(x), Y: float32(y), Z: float32(z)})
 		cols = append(cols, sampleColor(img, bounds, wx, wy, gw, gh))
 		if gn[i] > EdgeRatioThreshold {
 			edgeCount++
@@ -122,10 +123,8 @@ func buildStructure(depth []float32, w, h int, img image.Image, p Params, focal 
 		}
 		voxel = p.VoxelSize
 		// 下采样后点位变了，按最终点重新统计指标。
-		fxWork := focal * float64(gw) / float64(w)
-		fyWork := focal * float64(gh) / float64(h)
-		ratio = edgeRatioByInverse(pts, gw, gh, fxWork, fyWork, gn)
-		darkPointRatio = darkRatioByInverse(pts, gw, gh, fxWork, fyWork, img, dark)
+		ratio = edgeRatioByInverse(pts, proj, w, h, gw, gh, gn)
+		darkPointRatio = darkRatioByInverse(pts, proj, w, h, gw, gh, img, dark)
 		enrichment = darkEnrichmentOf(darkPointRatio, darkPixelRatio)
 	}
 
@@ -743,23 +742,17 @@ func stridePick(cands []int32, want int) []int32 {
 }
 
 // edgeRatioByInverse 把点云反向投影回网格像素，统计 Gn > 0.5 的点占比。
-// focalX/focalY 是"网格分辨率下的焦距"（depthpixel 模式直接传 focal）。
-// 注意点云里 z = -d（d 是距离），反解像素时要先取 d = -z。
-func edgeRatioByInverse(pts []geometry.Vec3, gw, gh int, focalX, focalY float64, gn []float32) float64 {
-	if len(pts) == 0 || len(gn) == 0 || focalX == 0 || focalY == 0 {
+// 反投影是正交↔透视可混合的，所以反解统一走 gridPixelFromPoint。
+func edgeRatioByInverse(pts []geometry.Vec3, proj geometry.UnprojectBlendParams, w, h, gw, gh int, gn []float32) float64 {
+	if len(pts) == 0 || len(gn) == 0 {
 		return 0
 	}
-	cx := float64(gw) / 2
-	cy := float64(gh) / 2
 	edge := 0
 	for _, p := range pts {
-		dist := -float64(p.Z) // z = -d
-		if dist <= 0 {
+		u, v, ok := gridPixelFromPoint(p, proj, w, h, gw, gh)
+		if !ok {
 			continue
 		}
-		// 由 x=(u+0.5-cx)*d/fx 反解 u、v。
-		u := float64(p.X)*focalX/dist + cx - 0.5
-		v := cy - float64(p.Y)*focalY/dist - 0.5
 		ix := int(math.Round(u))
 		iy := int(math.Round(v))
 		if ix < 0 {

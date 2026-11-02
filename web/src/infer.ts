@@ -72,6 +72,13 @@ export interface InferOptions {
   sampleMode?: 'structure' | 'depthpixel';
   /** 工作分辨率；0 = 自动（clamp(原图长边/2, 512, 2048)） */
   workRes?: number;
+  /**
+   * z 轴（垂直图片方向）压缩系数：z = -(d - dRef)·depthScale。
+   * 正交投影下只影响浮雕厚度：1=原始，0.5=一半，0.2=很薄。默认 0.5
+   */
+  depthScale?: number;
+  /** 反投影透视权重：0=正交（默认，层平行）/ 1=透视（放射） */
+  perspective?: number;
   signal?: AbortSignal;
   /** 阶段回调（给 UI 显示"模型加载中/推理中"） */
   onPhase?: (phase: string) => void;
@@ -109,6 +116,8 @@ export async function inferIllustration(file: File, options: InferOptions = {}):
   if (options.edgeThresh !== undefined) form.append('edge_thresh', String(options.edgeThresh));
   if (options.sampleMode) form.append('sample_mode', options.sampleMode);
   if (options.workRes !== undefined) form.append('work_res', String(options.workRes));
+  if (options.depthScale !== undefined) form.append('depth_scale', String(options.depthScale));
+  if (options.perspective !== undefined) form.append('perspective', String(options.perspective));
 
   options.onPhase?.('推理中（首帧可能要等模型预热）');
   const response = await fetch('/api/infer', {

@@ -79,6 +79,18 @@ const (
 	DefaultBandCompress = 0.3
 	// MaxBandWidth 是边界带宽度的上限（再宽就动到不该动的地方了）。
 	MaxBandWidth = 16
+	// DefaultPerspective 是反投影的透视混合权重，默认 0 = **纯正交**。
+	// 正交下各深度层都是与图像平行、等大的平面，只有 z 不同 → 转动是层间错动，
+	// 不是以视点为中心的放射状扇形（这是插画 2.5D 想要的）。
+	DefaultPerspective = 0.0
+	// DefaultDepthScale 是 z 轴（垂直图片方向）的压缩系数，默认 1 = 不压缩。
+	//
+	// 正交投影下 z 只影响「浮雕厚度」与视差强度：越小越像原图、侧转露洞越小。
+	// 注意 0 表示「用默认值」（与其他参数一致），要接近平面请用 0.001 这类小数。
+	DefaultDepthScale = 1.0
+	// MinDepthScale / MaxDepthScale 是允许区间。
+	MinDepthScale = 0.001
+	MaxDepthScale = 4.0
 	// autoEdgePercentile 是自动边缘阈值取的分位数：相邻深度差超过 p99 的判为遮挡边界。
 	autoEdgePercentile = 0.99
 
@@ -136,9 +148,19 @@ type Params struct {
 	// 边界带沿角色/背景轮廓向两侧膨胀。只影响带内像素。
 	BandWidth int
 	// BandCompress 是边界带的深度压缩比，[0,1]；1 = 恒等（不动）。
-	// 映射为 d' = d_char + BandCompress·(d - d_char)，d_char 是**局部**最近角色点深度，
+	// 映射为 d' = d_char + BandCompress·(d - d_char)，d_char 是**局部**稳定深度，
 	// 所以保持边界带内各点的相对位置。
 	BandCompress float64
+	// FlatThresh 是「突变两侧是否同层」的 IQR 阈值；0 = 自动（按梯度跨度取 6%）。
+	// IQR <= FlatThresh → 同层缝合伪影（压缩）；否则 → 真实台阶（不动）。
+	FlatThresh float64
+	// Perspective 是反投影的透视混合权重 [0,1]：
+	//   0 = 纯正交：各层与图像平行、等大，只有 z 不同（默认，插画 2.5D 的正确形态）
+	//   1 = 纯透视：x/y 随深度放大，点云呈以视点为中心的放射状
+	Perspective float64
+	// DepthScale 是 z 轴压缩系数：z = -(d - dRef)·DepthScale。
+	// 0 = 用默认 1（不压缩）；越小浮雕越薄、视差越弱、侧转露洞越小。
+	DepthScale float64
 }
 
 // Result 是一次点云生成的结果（附带回给前端的元数据）。
@@ -183,8 +205,12 @@ type Result struct {
 	LayerFlattened int
 	// LayerComponents 是保留下来的连通块数（人物通常是一个）。
 	LayerComponents int
-	// Band 是边界带深度压缩的统计（Enabled=false 时 Fallback 说明原因）。
-	Band BandStats
+	// Perspective 是实际使用的反投影透视权重（0=正交）。
+	Perspective float64
+	// DepthScale 是实际使用的 z 轴压缩系数。
+	DepthScale float64
+	// Seam 是深度缝合压缩的统计（Enabled=false 时 Fallback 说明原因）。
+	Seam SeamStats
 }
 
 // normalize 补默认值并做范围校验。
@@ -229,6 +255,21 @@ func (p Params) normalize() (Params, error) {
 	}
 	if math.IsNaN(p.BandCompress) || math.IsInf(p.BandCompress, 0) || p.BandCompress < 0 || p.BandCompress > 1 {
 		return p, fmt.Errorf("%w: band_compress=%v 必须落在 [0,1]", ErrInvalidParams, p.BandCompress)
+	}
+	if math.IsNaN(p.Perspective) || math.IsInf(p.Perspective, 0) || p.Perspective < 0 || p.Perspective > 1 {
+		return p, fmt.Errorf("%w: perspective=%v 必须落在 [0,1]", ErrInvalidParams, p.Perspective)
+	}
+	if p.DepthScale == 0 {
+		p.DepthScale = DefaultDepthScale
+	}
+	if math.IsNaN(p.DepthScale) || math.IsInf(p.DepthScale, 0) || p.DepthScale < 0 {
+		return p, fmt.Errorf("%w: depth_scale=%v 必须 >= 0", ErrInvalidParams, p.DepthScale)
+	}
+	if p.DepthScale < MinDepthScale {
+		p.DepthScale = MinDepthScale
+	}
+	if p.DepthScale > MaxDepthScale {
+		p.DepthScale = MaxDepthScale
 	}
 	switch p.SampleMode {
 	case "", SampleModeDepthPixel:
@@ -302,13 +343,11 @@ func BuildWithMask(
 		return nil, fmt.Errorf("%w: FilterDepthEdges 参数非法", ErrInvalidDepth)
 	}
 
-	// 1.2) 边界带深度压缩（推荐路径）：**只动人物轮廓附近**，
-	// 用分割 mask 找语义边界，把边界带的深度按「保持相对位置」往角色侧压缩。
-	// 角色内部与背景内部一个值都不改。
-	bandStats := BandStats{Fallback: "未提供分割 mask"}
-	if len(mask) > 0 && mw > 0 && mh > 0 {
-		depth, bandStats = adjustBoundaryBand(depth, w, h, mask, mw, mh, p.BandWidth, p.BandCompress)
-	}
+	// 1.2) 深度缝合压缩（推荐路径）：沿**深度不连续处**（≈ 插画线稿）清理层间散落点。
+	//
+	// 只动「突变两侧稳定深度同层」的缝合伪影；真实台阶（手臂朝前等）保持不动，
+	// 判据见 adjustDepthSeams 的注释。mask 目前不参与这一步（保留给将来的视差分类）。
+	depth, seamStats := adjustDepthSeams(depth, w, h, p.BandWidth, p.BandCompress, p.FlatThresh)
 
 	// 1.5) 深度层量化（可选，默认关闭）：整块压平——会损失角色立体感，
 	// 只作为对照/极端散落时的工具，不作为默认路径。
@@ -319,12 +358,13 @@ func BuildWithMask(
 
 	// 2) 相机：fx = fy = focal_factor * max(W,H)，主点在图像中心。
 	focal := p.FocalFactor * float64(maxInt(w, h))
+	proj := makeProj(depth, w, h, focal, p.Perspective, p.DepthScale)
 
 	var res *Result
 	if p.SampleMode == SampleModeStructure {
-		res, err = buildStructure(depth, w, h, img, p, focal, discard, thresh)
+		res, err = buildStructure(depth, w, h, img, p, focal, proj, discard, thresh)
 	} else {
-		res, err = buildDepthPixel(depth, w, h, img, p, focal, discard, thresh)
+		res, err = buildDepthPixel(depth, w, h, img, p, focal, proj, discard, thresh)
 	}
 	if err != nil {
 		return nil, err
@@ -333,16 +373,18 @@ func BuildWithMask(
 	res.LayerCenters = layerStats.Centers
 	res.LayerFlattened = layerStats.Flattened
 	res.LayerComponents = layerStats.Components
-	res.Band = bandStats
+	res.Perspective = p.Perspective
+	res.DepthScale = p.DepthScale
+	res.Seam = seamStats
 	return res, nil
 }
 
 // buildDepthPixel 是"1 深度像素 1 点"的路径（保留作 A/B 对照与回退）。
-func buildDepthPixel(depth []float32, w, h int, img image.Image, p Params, focal float64, discard []bool, thresh float32) (*Result, error) {
-	// 2) 反投影：fx = fy = focal_factor * max(W,H)，主点在图像中心。
-	pts := geometry.UnprojectPerspective(depth, w, h, focal, focal, float64(w)/2, float64(h)/2)
+func buildDepthPixel(depth []float32, w, h int, img image.Image, p Params, focal float64, proj geometry.UnprojectBlendParams, discard []bool, thresh float32) (*Result, error) {
+	// 2) 反投影（正交↔透视可混合，见 makeProj）。
+	pts := geometry.UnprojectBlend(depth, w, h, proj)
 	if pts == nil {
-		return nil, fmt.Errorf("%w: UnprojectPerspective 参数非法", ErrInvalidDepth)
+		return nil, fmt.Errorf("%w: UnprojectBlend 参数非法", ErrInvalidDepth)
 	}
 
 	// 3) 过滤 + 从原图取色（深度像素 → 原图对应位置，最近邻）。
@@ -393,8 +435,8 @@ func buildDepthPixel(depth []float32, w, h int, img image.Image, p Params, focal
 	darkPointRatio := 0.0
 	if len(kept) > 0 && focal > 0 {
 		gn := computeStructureMap(img, w, h)
-		ratio = edgeRatioByInverse(kept, w, h, focal, focal, gn)
-		darkPointRatio = darkRatioByInverse(kept, w, h, focal, focal, img, dark)
+		ratio = edgeRatioByInverse(kept, proj, w, h, w, h, gn)
+		darkPointRatio = darkRatioByInverse(kept, proj, w, h, w, h, img, dark)
 	}
 
 	minB, maxB := bbox(kept)
@@ -540,6 +582,76 @@ func medianDepth(pts []geometry.Vec3, maxSamples int) float64 {
 		return float64(vals[mid-1]+vals[mid]) / 2
 	}
 	return float64(vals[mid])
+}
+
+// medianDepthMap 用采样近似深度图的中位深度（用于确定正交投影的代表深度）。
+func medianDepthMap(depth []float32, w, h int) float64 {
+	n := w * h
+	if n == 0 {
+		return 1
+	}
+	const maxSamples = 8192
+	step := n / maxSamples
+	if step < 1 {
+		step = 1
+	}
+	vals := make([]float32, 0, maxSamples)
+	for i := 0; i < n; i += step {
+		if d := depth[i]; d > 0 && !math.IsNaN(float64(d)) && !math.IsInf(float64(d), 0) {
+			vals = append(vals, d)
+		}
+	}
+	if len(vals) == 0 {
+		return 1
+	}
+	sort.Slice(vals, func(i, j int) bool { return vals[i] < vals[j] })
+	return float64(vals[len(vals)/2])
+}
+
+// makeProj 组装反投影参数。
+//
+// 正交模式下 x/y 与深度无关（各层平行），需要给出「世界单位/像素」的比例；
+// 取代表深度 dRef = 深度中位数，令 orthoScale = dRef/focal——
+// 这样正交与透视在 dRef 处重合，切换 perspective 时尺寸连续。
+func makeProj(depth []float32, w, h int, focal, perspective, depthScale float64) geometry.UnprojectBlendParams {
+	dRef := medianDepthMap(depth, w, h)
+	if dRef <= 0 || math.IsNaN(dRef) || math.IsInf(dRef, 0) {
+		dRef = 1
+	}
+	return geometry.UnprojectBlendParams{
+		FX:          focal,
+		FY:          focal,
+		CX:          float64(w) / 2,
+		CY:          float64(h) / 2,
+		OrthoScale:  dRef / focal,
+		Perspective: perspective,
+		RefDepth:    dRef,
+		DepthScale:  depthScale,
+	}
+}
+
+// gridPixelFromPoint 把点反解回采样网格（gw×gh）的像素坐标。
+//
+// 与 makeProj/UnprojectBlend 严格互逆：x = dxImg·k，所以 dxImg = x/k。
+// 返回 false 表示该点无法反解（深度非正或比例非法）。
+func gridPixelFromPoint(p geometry.Vec3, proj geometry.UnprojectBlendParams, w, h, gw, gh int) (float64, float64, bool) {
+	if w <= 0 || h <= 0 || gw <= 0 || gh <= 0 {
+		return 0, 0, false
+	}
+	d := -float64(p.Z) // z = -d
+	if d <= 0 {
+		return 0, 0, false
+	}
+	kx := geometry.BlendPixelScale(proj, d, false)
+	ky := geometry.BlendPixelScale(proj, d, true)
+	if kx <= 0 || ky <= 0 {
+		return 0, 0, false
+	}
+	// 反解出原图像素坐标（与反投影同一 +0.5 约定）。
+	uImg := float64(p.X)/kx + proj.CX
+	vImg := proj.CY - float64(p.Y)/ky
+	// 原图像素 → 工作网格像素。
+	return uImg*float64(gw)/float64(w) - 0.5, vImg*float64(gh)/float64(h) - 0.5, true
 }
 
 // robustBBox 用分位数（lo/hi，如 0.01/0.99）估计包围盒，抽稀采样以控制开销。

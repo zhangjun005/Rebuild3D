@@ -22,6 +22,7 @@
 //   --clip <x,y,w,h>             只截指定区域
 //   --no-panel                   裁掉右侧面板（约 275px 宽）
 //   --angle <deg>                绕 target 水平旋转指定角度（会先关掉自动运动）
+//   --fov <deg>                  相机 FOV；越小越接近正交投影（默认 42）
 //
 // 例：
 //   node scripts/shot.cjs http://127.0.0.1:5173/ out/a.png --ilcl out/ab-ink.ilcl --preset engraving --no-panel
@@ -46,6 +47,7 @@ function parseArgs(argv) {
     clip: null,
     noPanel: false,
     angle: 0,
+    fov: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -57,6 +59,7 @@ function parseArgs(argv) {
     else if (a === '--params') o.params = JSON.parse(argv[++i]);
     else if (a === '--param') o.paramList.push(argv[++i]);
     else if (a === '--angle') o.angle = parseFloat(argv[++i]);
+    else if (a === '--fov') o.fov = parseFloat(argv[++i]);
     else if (a === '--clip') {
       const [x, y, w, h] = argv[++i].split(',').map(Number);
       o.clip = { x, y, width: w, height: h };
@@ -150,6 +153,15 @@ function parseArgs(argv) {
       api.syncPanel();
     }, patch);
     console.log('[params]', JSON.stringify(patch));
+  }
+
+  if (o.fov && ready) {
+    await page.evaluate((deg) => {
+      const api = /** @type {any} */ (globalThis).illust3d;
+      api.setCameraFov(deg);
+    }, o.fov);
+    await page.waitForTimeout(500);
+    console.log('[fov]', o.fov, 'deg');
   }
 
   await page.waitForTimeout(o.wait);

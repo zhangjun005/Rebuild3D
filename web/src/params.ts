@@ -24,6 +24,17 @@ export interface RenderParams {
   /** 结构增益：按局部结构时的灵敏度（越大越容易在弱纹理上上墨） */
   inkGain: number;
 
+  // ── 观察方式 ──
+  /**
+   * 相机 FOV（度）。**越小越接近正交投影**。
+   *
+   * 为什么它是渲染参数而不是生成参数：DA3 输出相对深度、没有内参，FOV 与模型无关，
+   * 纯粹是「怎么看这个点云」。42° = 默认透视；1~4° 视觉上等价于正交相机。
+   * 透视会让远层在画面上再缩小一次，整幅点云呈以视点为中心的放射状（扇形），
+   * 所以插画应该用小 FOV。
+   */
+  cameraFov: number;
+
   // ── L1 基元层 ──
   /** 点大小：参考深度处的屏幕像素直径（图像模式下隐藏） */
   pointSize: number;
@@ -160,6 +171,8 @@ export interface Preset {
 
 /** 所有预设共用的「默认关闭」参数，避免每个预设重复写一遍 */
 const DEFAULTS = {
+  // 相机 FOV：3° ≈ 正交（见 RenderParams.cameraFov）。42 是旧的透视值，会呈放射状扇形。
+  cameraFov: 3,
   halftone: 0,
   halftoneCell: 8,
   halftoneAngle: 45,
@@ -382,6 +395,13 @@ export interface GenParams {
   sampleMode: 'structure' | 'depthpixel';
   /** 工作分辨率；0 = 自动（clamp(原图长边/2, 512, 2048)） */
   workRes: number;
+  /**
+   * z 轴（垂直图片方向）压缩系数：z = -(d - dRef)·depthScale。
+   *
+   * 正交投影下 z 只决定「浮雕厚度」：1 = 原始厚度，0.5 = 一半，0.2 = 很薄。
+   * 越小越接近原图、侧转时露出的背景空洞越小；0.2~0.5 观感最稳。
+   */
+  depthScale: number;
 }
 
 export const GEN_DEFAULTS: GenParams = {
@@ -392,6 +412,7 @@ export const GEN_DEFAULTS: GenParams = {
   edgeThresh: 0,
   sampleMode: 'structure',
   workRes: 0,
+  depthScale: 0.5,
 };
 
 /** 点数档位（按钮） */

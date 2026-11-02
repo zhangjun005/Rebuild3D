@@ -58,6 +58,13 @@ export class GenSection {
         digits: 2,
         hint: '0 = 自动（按深度差 p99）；调大 = 更少剔除边缘点',
       }),
+      this.slider('纵深压缩', 'depthScale', {
+        min: 0.05,
+        max: 1.5,
+        step: 0.05,
+        digits: 2,
+        hint: 'z 轴压缩：1=原始厚度，0.5=一半，0.2=很薄。越小越像原图、侧转露出的空洞越小',
+      }),
     );
     root.append(twoCol);
 
@@ -218,7 +225,7 @@ export class GenSection {
 
   private slider(
     label: string,
-    key: 'focalFactor' | 'edgeThresh',
+    key: 'focalFactor' | 'edgeThresh' | 'depthScale',
     config: { min: number; max: number; step: number; digits: number; hint: string },
   ): HTMLElement {
     const row = document.createElement('div');
@@ -255,6 +262,7 @@ function dirtyOf(current: GenParams, applied: GenParams): boolean {
     current.maxPoints !== applied.maxPoints ||
     current.edgeThresh !== applied.edgeThresh ||
     current.sampleMode !== applied.sampleMode ||
-    current.workRes !== applied.workRes
+    current.workRes !== applied.workRes ||
+    current.depthScale !== applied.depthScale
   );
 }
