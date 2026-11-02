@@ -5,13 +5,15 @@
 //	请求：total_len u32 | cmd u8 | arg u32 | body
 //	响应：total_len u32 | status u8 | body（body 按 cmd 解析）
 //
-// cmd: 1=PING 2=INFER 3=UNLOAD；status: 0=成功 1=错误（body 是 UTF-8 错误信息）。
+// cmd: 1=PING 2=INFER 3=UNLOAD 4=SEGMENT；status: 0=成功 1=错误（body 是 UTF-8 错误信息）。
 //
 // 约定：
 //   - sidecar 的日志必须写 stderr，stdout 只放帧，否则会污染协议流；
 //   - PING 的 body 是 UTF-8 JSON（model/device/vram_used_mb/ready）；
 //   - INFER 的 body 是 width u32 + height u32 + flags u32 + depth f32[W*H]，
 //     flags&1 时追加 conf f32[W*H]；
+//   - SEGMENT 的 body 是 width u32 + height u32 + mask u8[W*H]，
+//     mask 三档：0=背景 128=不确定 255=角色（见 MaskBackground/MaskUncertain/MaskCharacter）；
 //   - UNLOAD 的 body 为空。
 package infer
 
@@ -26,9 +28,10 @@ import (
 
 // 协议命令字。
 const (
-	CmdPing   byte = 1
-	CmdInfer  byte = 2
-	CmdUnload byte = 3
+	CmdPing    byte = 1
+	CmdInfer   byte = 2
+	CmdUnload  byte = 3
+	CmdSegment byte = 4
 )
 
 // 协议响应状态。
@@ -110,6 +113,8 @@ func cmdName(cmd byte) string {
 		return "INFER"
 	case CmdUnload:
 		return "UNLOAD"
+	case CmdSegment:
+		return "SEGMENT"
 	default:
 		return fmt.Sprintf("cmd=%d", cmd)
 	}
@@ -202,4 +207,44 @@ func decodeInfer(body []byte) (*DepthResult, error) {
 		}
 	}
 	return &DepthResult{Width: int(w), Height: int(h), Flags: flags, Depth: depth, Conf: conf}, nil
+}
+
+// 分割 mask 的三档取值（与 sidecar/seg_engine.py 约定一致）。
+const (
+	// MaskBackground 表示背景（prob < 0.4）。
+	MaskBackground uint8 = 0
+	// MaskUncertain 表示不确定（0.4 <= prob < 0.6）——天然的边界带起点。
+	MaskUncertain uint8 = 128
+	// MaskCharacter 表示角色（prob >= 0.6）。
+	MaskCharacter uint8 = 255
+)
+
+// SegResult 是 SEGMENT 的响应：角色分割 mask，尺寸与原图一致。
+type SegResult struct {
+	Width  int
+	Height int
+	// Mask 是三档 mask（MaskBackground / MaskUncertain / MaskCharacter）。
+	Mask []uint8
+}
+
+// decodeSegment 解析 SEGMENT 的二进制体：width u32 + height u32 + mask u8[W*H]。
+func decodeSegment(body []byte) (*SegResult, error) {
+	if len(body) < 8 {
+		return nil, fmt.Errorf("%w: SEGMENT 响应头不足 8 字节（实际 %d）", ErrProtocol, len(body))
+	}
+	w := binary.LittleEndian.Uint32(body[0:4])
+	h := binary.LittleEndian.Uint32(body[4:8])
+	if w == 0 || h == 0 || w > MaxDepthDim || h > MaxDepthDim {
+		return nil, fmt.Errorf("%w: SEGMENT 尺寸非法 %dx%d", ErrProtocol, w, h)
+	}
+	n := uint64(w) * uint64(h)
+	if uint64(len(body)) < 8+n {
+		return nil, fmt.Errorf("%w: SEGMENT 响应体不足：需要 %d 字节，实际 %d", ErrProtocol, 8+n, len(body))
+	}
+	mask := make([]uint8, n)
+	raw := body[8 : 8+n]
+	for i := range mask {
+		mask[i] = raw[i]
+	}
+	return &SegResult{Width: int(w), Height: int(h), Mask: mask}, nil
 }

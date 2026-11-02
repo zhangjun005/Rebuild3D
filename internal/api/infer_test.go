@@ -30,12 +30,29 @@ type stubSidecar struct {
 	status infer.Status
 	image  []byte
 	calls  int
+	// 分割桩：默认返回"全背景"mask（有分割但无角色 → 边界带退化，不影响原有断言）；
+	// segRes/segErr 显式设置时覆盖。
+	segRes   *infer.SegResult
+	segErr   error
+	segCalls int
 }
 
 func (s *stubSidecar) Infer(_ context.Context, img []byte, _ uint32) (*infer.DepthResult, error) {
 	s.calls++
 	s.image = append([]byte(nil), img...)
 	return s.res, s.err
+}
+
+func (s *stubSidecar) Segment(_ context.Context, _ []byte) (*infer.SegResult, error) {
+	s.segCalls++
+	if s.segRes != nil || s.segErr != nil {
+		return s.segRes, s.segErr
+	}
+	w, h := 1, 1
+	if s.res != nil && s.res.Width > 0 && s.res.Height > 0 {
+		w, h = s.res.Width, s.res.Height
+	}
+	return &infer.SegResult{Width: w, Height: h, Mask: make([]uint8, w*h)}, nil
 }
 
 func (s *stubSidecar) Status() infer.Status { return s.status }

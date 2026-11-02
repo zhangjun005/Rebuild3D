@@ -26,10 +26,12 @@ import struct
 import sys
 
 from depth_engine import DEFAULT_MODEL, DEFAULT_RES, DepthEngine
+from seg_engine import DEFAULT_SEG_MODEL, SegEngine
 
 CMD_PING = 1
 CMD_INFER = 2
 CMD_UNLOAD = 3
+CMD_SEGMENT = 4
 
 STATUS_OK = 0
 STATUS_ERR = 1
@@ -75,6 +77,17 @@ def handle_infer(engine: DepthEngine, body: bytes) -> bytes:
     return struct.pack("<III", w, h, flags) + depth_bytes
 
 
+def handle_segment(seg: SegEngine, body: bytes) -> bytes:
+    """SEGMENT：原始图片字节 → width u32 + height u32 + mask u8[W*H]。
+
+    mask 三档：255=角色、0=背景、128=不确定（0.4~0.6 概率之间）。
+    """
+    if not body:
+        raise ValueError("SEGMENT 的 body 为空（应为原始图片字节）")
+    mask, w, h = seg.segment(body)
+    return struct.pack("<II", w, h) + mask
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="illust3d Python 推理 sidecar（stdio 帧协议）")
     ap.add_argument("--model", default=DEFAULT_MODEL)
@@ -90,6 +103,16 @@ def main() -> int:
         action="store_true",
         help="允许从 HF 拉权重（默认只认本地缓存快照）",
     )
+    ap.add_argument(
+        "--seg-model",
+        default=DEFAULT_SEG_MODEL,
+        help="角色分割 ONNX 路径（anime-seg / isnet_is）；不存在则不启用分割",
+    )
+    ap.add_argument(
+        "--no-seg",
+        action="store_true",
+        help="禁用分割（SEGMENT 会直接报错，Go 侧应据此退化）",
+    )
     args = ap.parse_args()
 
     # stdout/stdin 用二进制，禁用缓冲（帧必须立刻到达对端）
@@ -103,6 +126,8 @@ def main() -> int:
         process_res=args.res,
         local_files_only=not args.allow_network,
     )
+    seg = SegEngine(model_path=args.seg_model, enabled=not args.no_seg)
+    log(f"分割引擎：{seg.status()}")
 
     if not args.lazy:
         try:
@@ -154,7 +179,10 @@ def main() -> int:
                 resp = handle_infer(engine, body)
             elif cmd == CMD_UNLOAD:
                 engine.unload()
+                seg.unload()
                 resp = b""
+            elif cmd == CMD_SEGMENT:
+                resp = handle_segment(seg, body)
             else:
                 raise ValueError(f"未知 cmd={cmd}")
             write_frame(stdout, STATUS_OK, resp)

@@ -15,10 +15,12 @@ import (
 
 // 默认超时。
 const (
-	defaultPingTimeout   = 120 * time.Second // 首次 PING 可能触发模型加载（30~120s）
-	defaultInferTimeout  = 60 * time.Second
-	defaultUnloadTimeout = 10 * time.Second
-	closeGrace           = 5 * time.Second
+	defaultPingTimeout  = 120 * time.Second // 首次 PING 可能触发模型加载（30~120s）
+	defaultInferTimeout = 60 * time.Second
+	// defaultSegmentTimeout 给 CPU 上的 ONNX 分割留足时间（单张约 0.7s，大图更久）。
+	defaultSegmentTimeout = 120 * time.Second
+	defaultUnloadTimeout  = 10 * time.Second
+	closeGrace            = 5 * time.Second
 	// drainGrace 是"调用被取消后，允许等这一帧读完"的上限。
 	// 读完 → 管道保持同步；读不完 → 判定失步，交给上层重建管道。
 	drainGrace = 10 * time.Second
@@ -38,6 +40,8 @@ type Config struct {
 	PingTimeout time.Duration
 	// InferTimeout 是单帧 INFER 响应超时；<=0 用默认 60s。
 	InferTimeout time.Duration
+	// SegmentTimeout 是 SEGMENT（角色分割）响应超时；<=0 用默认 120s。
+	SegmentTimeout time.Duration
 	// UnloadTimeout 是 UNLOAD 响应超时；<=0 用默认 10s。
 	UnloadTimeout time.Duration
 	// Logf 接收 sidecar 的 stderr 行；nil 时用标准库 log。
@@ -55,9 +59,10 @@ type Client struct {
 	stdout *bufio.Reader
 	logf   func(format string, args ...any)
 
-	pingTimeout   time.Duration
-	inferTimeout  time.Duration
-	unloadTimeout time.Duration
+	pingTimeout    time.Duration
+	inferTimeout   time.Duration
+	segmentTimeout time.Duration
+	unloadTimeout  time.Duration
 
 	mu     sync.Mutex
 	closed bool
@@ -102,19 +107,23 @@ func Start(ctx context.Context, cfg Config) (*Client, error) {
 		logf = log.Printf
 	}
 	c := &Client{
-		cmd:           cmd,
-		stdin:         stdin,
-		stdout:        bufio.NewReaderSize(stdout, 1<<20),
-		logf:          logf,
-		pingTimeout:   defaultPingTimeout,
-		inferTimeout:  defaultInferTimeout,
-		unloadTimeout: defaultUnloadTimeout,
+		cmd:            cmd,
+		stdin:          stdin,
+		stdout:         bufio.NewReaderSize(stdout, 1<<20),
+		logf:           logf,
+		pingTimeout:    defaultPingTimeout,
+		inferTimeout:   defaultInferTimeout,
+		segmentTimeout: defaultSegmentTimeout,
+		unloadTimeout:  defaultUnloadTimeout,
 	}
 	if cfg.PingTimeout > 0 {
 		c.pingTimeout = cfg.PingTimeout
 	}
 	if cfg.InferTimeout > 0 {
 		c.inferTimeout = cfg.InferTimeout
+	}
+	if cfg.SegmentTimeout > 0 {
+		c.segmentTimeout = cfg.SegmentTimeout
 	}
 	if cfg.UnloadTimeout > 0 {
 		c.unloadTimeout = cfg.UnloadTimeout
@@ -164,6 +173,18 @@ func (c *Client) Infer(ctx context.Context, image []byte, processRes uint32) (*D
 func (c *Client) Unload(ctx context.Context) error {
 	_, err := c.call(ctx, CmdUnload, 0, nil, c.unloadTimeout)
 	return err
+}
+
+// Segment 请求角色分割 mask（sidecar 用 anime-seg 的 ONNX，CPU 推理）。
+//
+// image 与 Infer 用同一份原始图片字节。SEGMENT 与 INFER 是独立命令，
+// 便于分别测试和降级：分割失败不应该影响深度这条主链路。
+func (c *Client) Segment(ctx context.Context, image []byte) (*SegResult, error) {
+	body, err := c.call(ctx, CmdSegment, 0, image, c.segmentTimeout)
+	if err != nil {
+		return nil, err
+	}
+	return decodeSegment(body)
 }
 
 // call 完成一次"写请求 + 读响应"。

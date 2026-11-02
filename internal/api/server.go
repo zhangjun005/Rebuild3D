@@ -37,6 +37,9 @@ const (
 type Sidecar interface {
 	// Infer 把原始图片字节送进 sidecar，返回深度图。
 	Infer(ctx context.Context, image []byte, processRes uint32) (*infer.DepthResult, error)
+	// Segment 返回角色分割 mask（三档：0=背景 128=不确定 255=角色）。
+	// 失败不应影响主链路：调用方据此退化（不做边界带处理）。
+	Segment(ctx context.Context, image []byte) (*infer.SegResult, error)
 	// Status 返回 sidecar 状态快照（非阻塞，供 /api/health 使用）。
 	Status() infer.Status
 }

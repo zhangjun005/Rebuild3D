@@ -142,9 +142,30 @@ func (s *Server) handleInfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 3.5) 角色分割（best-effort）：给「边界带深度压缩」提供语义边界。
+	//
+	// 为什么允许失败：分割只是锦上添花——失败时退化成"不做边界带处理"，
+	// 深度→点云这条主链路必须照常工作。
+	segStart := time.Now()
+	seg, segErr := s.sidecar.Segment(r.Context(), imgBytes)
+	segMs := milliseconds(time.Since(segStart))
+	var mask []uint8
+	var maskW, maskH int
+	segError := ""
+	switch {
+	case segErr != nil:
+		segError = segErr.Error()
+	case seg == nil || seg.Width <= 0 || seg.Height <= 0:
+		segError = "分割返回空结果"
+	case len(seg.Mask) != seg.Width*seg.Height:
+		segError = fmt.Sprintf("分割 mask 尺寸不一致：len=%d, %dx%d", len(seg.Mask), seg.Width, seg.Height)
+	default:
+		mask, maskW, maskH = seg.Mask, seg.Width, seg.Height
+	}
+
 	// 4) 深度 → 点云（几何与 ILC1 编码都在 Go 侧）。
 	geoStart := time.Now()
-	res, err := pipeline.Build(depth.Depth, depth.Width, depth.Height, img, params)
+	res, err := pipeline.BuildWithMask(depth.Depth, depth.Width, depth.Height, img, mask, maskW, maskH, params)
 	geoMs := milliseconds(time.Since(geoStart))
 	if err != nil {
 		status := http.StatusUnprocessableEntity
@@ -156,7 +177,7 @@ func (s *Server) handleInfer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.URL.Query().Get("format") == "meta" {
-		meta := newInferMeta(res, params, s.processRes, format, len(imgBytes), inferMs, geoMs, milliseconds(time.Since(totalStart)))
+		meta := newInferMeta(res, params, s.processRes, format, len(imgBytes), inferMs, segMs, geoMs, milliseconds(time.Since(totalStart)), segError)
 		writeJSON(w, http.StatusOK, meta, true)
 		return
 	}
@@ -231,12 +252,14 @@ func (s *Server) writeInferError(w http.ResponseWriter, err error) {
 // 以保持向后兼容，两边都在结果里如实报告实际使用的模式。
 func parseInferParams(form url.Values) (pipeline.Params, error) {
 	p := pipeline.Params{
-		FocalFactor: pipeline.DefaultFocalFactor,
-		MaxPoints:   pipeline.DefaultMaxPoints,
-		SampleMode:  pipeline.SampleModeStructure,
-		EdgeWeight:  pipeline.DefaultEdgeWeight,
-		InkWeight:   pipeline.DefaultInkWeight,
-		LayerCount:  pipeline.DefaultLayerCount,
+		FocalFactor:  pipeline.DefaultFocalFactor,
+		MaxPoints:    pipeline.DefaultMaxPoints,
+		SampleMode:   pipeline.SampleModeStructure,
+		EdgeWeight:   pipeline.DefaultEdgeWeight,
+		InkWeight:    pipeline.DefaultInkWeight,
+		LayerCount:   pipeline.DefaultLayerCount,
+		BandWidth:    pipeline.DefaultBandWidth,
+		BandCompress: pipeline.DefaultBandCompress,
 	}
 	if v := form.Get("focal_factor"); v != "" {
 		f, err := strconv.ParseFloat(v, 64)
@@ -301,6 +324,20 @@ func parseInferParams(form url.Values) (pipeline.Params, error) {
 		}
 		p.WorkRes = n
 	}
+	if v := form.Get("band_width"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return p, fmt.Errorf("band_width 必须是非负整数（像素，0=关闭）: %q", v)
+		}
+		p.BandWidth = n
+	}
+	if v := form.Get("band_compress"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f < 0 || f > 1 || math.IsNaN(f) || math.IsInf(f, 0) {
+			return p, fmt.Errorf("band_compress 必须落在 [0,1]: %q", v)
+		}
+		p.BandCompress = f
+	}
 	if v := form.Get("layer_count"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {
@@ -357,11 +394,23 @@ type (
 		LayerCenters    []float32 `json:"layerCenters,omitempty"`
 		LayerFlattened  int       `json:"layerFlattened"`
 		LayerComponents int       `json:"layerComponents"`
+		// 边界带深度压缩（mask 引导）：只动人物轮廓附近，角色/背景内部不动。
+		BandEnabled    bool    `json:"bandEnabled"`
+		BandFallback   string  `json:"bandFallback,omitempty"`
+		BandWidth      int     `json:"bandWidth"`
+		BandCompress   float64 `json:"bandCompress"`
+		BandPixels     int     `json:"bandPixels"`
+		BandAdjusted   int     `json:"bandAdjusted"`
+		BandCharRatio  float64 `json:"bandCharRatio"`
+		BandBorderFrac float64 `json:"bandBorderFrac"`
+		// 角色分割（anime-seg，CPU 推理）。SegError 非空 = 分割失败、边界带已退化。
+		SegmentMs float64 `json:"segmentMs"`
+		SegError  string  `json:"segError,omitempty"`
 	}
 )
 
 // newInferMeta 组装返回给前端的点云元数据。
-func newInferMeta(res *pipeline.Result, params pipeline.Params, processRes int, format string, imgBytes int, inferMs, geoMs, totalMs float64) inferMeta {
+func newInferMeta(res *pipeline.Result, params pipeline.Params, processRes int, format string, imgBytes int, inferMs, segMs, geoMs, totalMs float64, segError string) inferMeta {
 	edgeWeight, inkWeight := params.EdgeWeight, params.InkWeight
 	if res.SampleMode != pipeline.SampleModeStructure {
 		edgeWeight, inkWeight = 0, 0 // depthpixel 模式不用这些权重，别误导前端
@@ -396,6 +445,17 @@ func newInferMeta(res *pipeline.Result, params pipeline.Params, processRes int, 
 		LayerCenters:    res.LayerCenters,
 		LayerFlattened:  res.LayerFlattened,
 		LayerComponents: res.LayerComponents,
+
+		BandEnabled:    res.Band.Enabled,
+		BandFallback:   res.Band.Fallback,
+		BandWidth:      res.Band.BandWidth,
+		BandCompress:   res.Band.Compress,
+		BandPixels:     res.Band.BandPixels,
+		BandAdjusted:   res.Band.Adjusted,
+		BandCharRatio:  res.Band.CharRatio,
+		BandBorderFrac: res.Band.BorderFrac,
+		SegmentMs:      segMs,
+		SegError:       segError,
 	}
 }
 

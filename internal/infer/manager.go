@@ -56,6 +56,8 @@ type ManagerConfig struct {
 	PingTimeout time.Duration
 	// InferTimeout 是单帧 INFER 超时；<=0 用 60s。
 	InferTimeout time.Duration
+	// SegmentTimeout 是单帧 SEGMENT（角色分割）超时；<=0 用 120s。
+	SegmentTimeout time.Duration
 	// Logf 接收日志（sidecar stderr 与生命周期事件）；nil 用标准库 log。
 	Logf func(format string, args ...any)
 }
@@ -74,6 +76,8 @@ type Status struct {
 	// LoadSeconds 是模型加载耗时；LastInferSeconds 是最近一次推理耗时。
 	LoadSeconds      float64 `json:"load_seconds,omitempty"`
 	LastInferSeconds float64 `json:"last_infer_seconds"`
+	// LastSegmentSeconds 是最近一次角色分割耗时（CPU 推理，约 0.7s）。
+	LastSegmentSeconds float64 `json:"last_segment_seconds,omitempty"`
 
 	// PID 是当前 sidecar 进程号；Restarts 是崩溃重启次数（上限 maxRestarts）。
 	PID      int `json:"pid,omitempty"`
@@ -138,6 +142,10 @@ func NewManager(cfg ManagerConfig) *Manager {
 	if cfg.InferTimeout <= 0 {
 		cfg.InferTimeout = 60 * time.Second
 	}
+	if cfg.SegmentTimeout <= 0 {
+		// 分割走 CPU、单张约 0.7s；留足余量给大图与冷启动（首次要加载 ONNX）。
+		cfg.SegmentTimeout = 120 * time.Second
+	}
 	logf := cfg.Logf
 	if logf == nil {
 		logf = log.Printf
@@ -200,13 +208,14 @@ func (m *Manager) launch() error {
 	args = append(args, m.cfg.ScriptArgs...)
 
 	c, err := Start(context.Background(), Config{
-		Path:         m.cfg.Python,
-		Args:         args,
-		Dir:          m.cfg.Dir,
-		Env:          m.cfg.Env,
-		Logf:         m.logf,
-		PingTimeout:  m.cfg.PingTimeout,
-		InferTimeout: m.cfg.InferTimeout,
+		Path:           m.cfg.Python,
+		Args:           args,
+		Dir:            m.cfg.Dir,
+		Env:            m.cfg.Env,
+		Logf:           m.logf,
+		PingTimeout:    m.cfg.PingTimeout,
+		InferTimeout:   m.cfg.InferTimeout,
+		SegmentTimeout: m.cfg.SegmentTimeout,
 	})
 	if err != nil {
 		return fmt.Errorf("拉起 sidecar 失败（%s %s）: %w", m.cfg.Python, m.cfg.Script, err)
@@ -546,6 +555,74 @@ func (m *Manager) inferOnce(c *Client, image []byte, processRes uint32) (*DepthR
 	opCtx, cancel := context.WithTimeout(context.Background(), m.cfg.InferTimeout)
 	defer cancel()
 	return c.Infer(opCtx, image, processRes)
+}
+
+// Segment 请求角色分割 mask。纪律与 Infer 完全一致（独立 context、失步重建、崩溃重启）。
+//
+// 为什么同样严格：SEGMENT 和 INFER 共用同一条管道，任何一边留下半帧都会让另一边失步。
+func (m *Manager) Segment(ctx context.Context, image []byte) (*SegResult, error) {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+
+	if err := m.waitReadyOp(ctx); err != nil {
+		return nil, err
+	}
+	c := m.currentClient()
+	if c == nil {
+		return nil, errors.New("infer: sidecar 客户端缺失")
+	}
+
+	start := time.Now()
+	res, err := m.segmentOnce(c, image)
+
+	for repairs := 0; err != nil && errors.Is(err, ErrDesync) && repairs < maxDesyncRepairs; repairs++ {
+		m.logf("分割时 sidecar 管道失步，重建管道后重试：%v", err)
+		if rerr := m.repairDesyncOp(err); rerr != nil {
+			m.markNotReady(rerr)
+			return nil, fmt.Errorf("sidecar 管道重建失败: %w（原始错误: %v）", rerr, err)
+		}
+		c = m.currentClient()
+		if c == nil {
+			return nil, errors.New("infer: sidecar 客户端缺失")
+		}
+		res, err = m.segmentOnce(c, image)
+	}
+
+	if err != nil && m.shouldRestart(err) {
+		m.logf("分割时 sidecar 进程错误，重启一次后重试：%v", err)
+		if rerr := m.restartOp(); rerr != nil {
+			m.markNotReady(rerr)
+			return nil, fmt.Errorf("sidecar 重启失败: %w（原始错误: %v）", rerr, err)
+		}
+		c = m.currentClient()
+		if c == nil {
+			return nil, errors.New("infer: sidecar 客户端缺失")
+		}
+		res, err = m.segmentOnce(c, image)
+	}
+
+	if err != nil {
+		if isSidecarBroken(err) {
+			m.markNotReady(err)
+		}
+		return nil, err
+	}
+
+	m.mu.Lock()
+	m.status.LastSegmentSeconds = time.Since(start).Seconds()
+	m.mu.Unlock()
+
+	if cerr := ctx.Err(); cerr != nil {
+		return nil, fmt.Errorf("分割完成但请求已取消（结果丢弃，管道保持同步）: %w", cerr)
+	}
+	return res, nil
+}
+
+// segmentOnce 用独立 context 调 SEGMENT。
+func (m *Manager) segmentOnce(c *Client, image []byte) (*SegResult, error) {
+	opCtx, cancel := context.WithTimeout(context.Background(), m.cfg.SegmentTimeout)
+	defer cancel()
+	return c.Segment(opCtx, image)
 }
 
 // shouldRestart 判断错误是否属于"进程崩溃/EOF"，值得用崩溃预算重启一次。

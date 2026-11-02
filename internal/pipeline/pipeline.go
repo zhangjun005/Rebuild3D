@@ -61,10 +61,24 @@ const (
 	// 为什么默认开：DA3 在插画上的深度是一条连续分布，主体与背景之间有一条"过渡尾巴"
 	// （实测 100 万点里 16.9% 落在层间且集中在人物周围）。这些点反投影后位于两层之间的
 	// 中间 z，形成"从人物拖向背景的丝状散落点云"。层量化把它们吸附到连通块的深度上。
-	DefaultLayerCount = 3
+	DefaultLayerCount = 0
 	// MinLayerCount / MaxLayerCount 是层数的允许区间。
 	MinLayerCount = 2
 	MaxLayerCount = 8
+	// DefaultBandWidth / DefaultBandCompress 是「边界带深度压缩」的默认参数。
+	//
+	// 边界带 = 角色/背景轮廓向两侧膨胀 bandWidth 像素。
+	// 压缩比 1 = 恒等（不动），越小越把边界带的深度往角色侧收（保持相对位置）。
+	// 只影响边界带，角色内部与背景内部一律不动。
+	//
+	// ⚠ 默认关闭（0）。原因（实测，2026-11-01）：「按语义轮廓划边界带」只覆盖人物外轮廓，
+	// 而散落点实际描在插画的**每根线稿**上（发丝/衣褶/指甲等内部线稿完全没覆盖）。
+	// 用分割边界做带只改了 1.3% 像素，侧视 30° 前后看不出差别。
+	// 待改成「深度不连续带 + 同层 IQR 判据（区分真实台阶与线稿缝合）」后再启用。
+	DefaultBandWidth    = 0
+	DefaultBandCompress = 0.3
+	// MaxBandWidth 是边界带宽度的上限（再宽就动到不该动的地方了）。
+	MaxBandWidth = 16
 	// autoEdgePercentile 是自动边缘阈值取的分位数：相邻深度差超过 p99 的判为遮挡边界。
 	autoEdgePercentile = 0.99
 
@@ -116,7 +130,15 @@ type Params struct {
 	WorkRes int
 	// LayerCount 是深度层量化的层数：0 = 关闭（保留老行为），2~8 有效。
 	// 开启后，反投影之前会把深度吸附到「连通块深度中位数」，消除层间中间深度点。
+	// ⚠ 这会损失角色立体感（整块变平），不是默认路径，只作为对照工具。
 	LayerCount int
+	// BandWidth 是「边界带深度压缩」的边界带宽度（像素）；0 = 关闭。
+	// 边界带沿角色/背景轮廓向两侧膨胀。只影响带内像素。
+	BandWidth int
+	// BandCompress 是边界带的深度压缩比，[0,1]；1 = 恒等（不动）。
+	// 映射为 d' = d_char + BandCompress·(d - d_char)，d_char 是**局部**最近角色点深度，
+	// 所以保持边界带内各点的相对位置。
+	BandCompress float64
 }
 
 // Result 是一次点云生成的结果（附带回给前端的元数据）。
@@ -161,6 +183,8 @@ type Result struct {
 	LayerFlattened int
 	// LayerComponents 是保留下来的连通块数（人物通常是一个）。
 	LayerComponents int
+	// Band 是边界带深度压缩的统计（Enabled=false 时 Fallback 说明原因）。
+	Band BandStats
 }
 
 // normalize 补默认值并做范围校验。
@@ -196,6 +220,16 @@ func (p Params) normalize() (Params, error) {
 	if p.LayerCount > MaxLayerCount {
 		p.LayerCount = MaxLayerCount
 	}
+	// 边界带：宽度 0 = 关闭；压缩比必须落在 [0,1]（1 = 恒等）。
+	if p.BandWidth < 0 {
+		return p, fmt.Errorf("%w: band_width=%d 必须 >= 0", ErrInvalidParams, p.BandWidth)
+	}
+	if p.BandWidth > MaxBandWidth {
+		p.BandWidth = MaxBandWidth
+	}
+	if math.IsNaN(p.BandCompress) || math.IsInf(p.BandCompress, 0) || p.BandCompress < 0 || p.BandCompress > 1 {
+		return p, fmt.Errorf("%w: band_compress=%v 必须落在 [0,1]", ErrInvalidParams, p.BandCompress)
+	}
 	switch p.SampleMode {
 	case "", SampleModeDepthPixel:
 		p.SampleMode = SampleModeDepthPixel
@@ -228,13 +262,25 @@ func (p Params) normalize() (Params, error) {
 	return p, nil
 }
 
-// Build 从深度图与原图生成点云。
+// Build 从深度图与原图生成点云（不带分割 mask；等价于 BuildWithMask 传 nil）。
 //
 // depth 长度必须 >= w*h（下标 = y*w+x）；img 用于给每个点取颜色。
 // 返回的 Result.ILC1 已经是最终字节，可直接作为 HTTP 响应体。
 //
 // 采样模式见 Params.SampleMode；两种模式共用深度边缘剔除与相机约定。
 func Build(depth []float32, w, h int, img image.Image, params Params) (*Result, error) {
+	return BuildWithMask(depth, w, h, img, nil, 0, 0, params)
+}
+
+// BuildWithMask 与 Build 相同，但额外接受角色分割 mask 来做「边界带深度压缩」。
+//
+// mask 三档：0=背景 128=不确定 255=角色（尺寸 mw×mh，可与深度图不同）。
+// mask 为空时行为与 Build 完全一致。
+func BuildWithMask(
+	depth []float32, w, h int, img image.Image,
+	mask []uint8, mw, mh int,
+	params Params,
+) (*Result, error) {
 	p, err := params.normalize()
 	if err != nil {
 		return nil, err
@@ -256,11 +302,16 @@ func Build(depth []float32, w, h int, img image.Image, params Params) (*Result, 
 		return nil, fmt.Errorf("%w: FilterDepthEdges 参数非法", ErrInvalidDepth)
 	}
 
-	// 1.5) 深度层量化（可选）：把连续深度吸附到「连通块的深度中位数」。
-	//
-	// 这一步专治「人物与背景之间拖出一大片散落点云」：DA3 在插画上输出的是连续深度，
-	// 主体与背景之间有一条过渡尾巴，反投影后落在两层之间的中间 z，却在 x/y 上贴着人物
-	// 轮廓，于是形成丝状散落带。量化后层间不再有中间 z，且人物按连通域整体归属，不会被切开。
+	// 1.2) 边界带深度压缩（推荐路径）：**只动人物轮廓附近**，
+	// 用分割 mask 找语义边界，把边界带的深度按「保持相对位置」往角色侧压缩。
+	// 角色内部与背景内部一个值都不改。
+	bandStats := BandStats{Fallback: "未提供分割 mask"}
+	if len(mask) > 0 && mw > 0 && mh > 0 {
+		depth, bandStats = adjustBoundaryBand(depth, w, h, mask, mw, mh, p.BandWidth, p.BandCompress)
+	}
+
+	// 1.5) 深度层量化（可选，默认关闭）：整块压平——会损失角色立体感，
+	// 只作为对照/极端散落时的工具，不作为默认路径。
 	var layerStats LayerQuantizeStats
 	if p.LayerCount >= MinLayerCount {
 		depth, layerStats = quantizeDepthLayers(depth, w, h, discard, p.LayerCount)
@@ -282,6 +333,7 @@ func Build(depth []float32, w, h int, img image.Image, params Params) (*Result, 
 	res.LayerCenters = layerStats.Centers
 	res.LayerFlattened = layerStats.Flattened
 	res.LayerComponents = layerStats.Components
+	res.Band = bandStats
 	return res, nil
 }
 
