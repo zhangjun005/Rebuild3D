@@ -144,23 +144,29 @@ func (s *Server) handleInfer(w http.ResponseWriter, r *http.Request) {
 
 	// 3.5) 角色分割（best-effort）：给「边界带深度压缩」提供语义边界。
 	//
+	// 只在真的要用时才调（band_width>0）——分割是 CPU 推理、约 0.9s，
+	// 边界带关闭时白花这个时间没有意义。
+	//
 	// 为什么允许失败：分割只是锦上添花——失败时退化成"不做边界带处理"，
 	// 深度→点云这条主链路必须照常工作。
-	segStart := time.Now()
-	seg, segErr := s.sidecar.Segment(r.Context(), imgBytes)
-	segMs := milliseconds(time.Since(segStart))
+	var segMs float64
 	var mask []uint8
 	var maskW, maskH int
 	segError := ""
-	switch {
-	case segErr != nil:
-		segError = segErr.Error()
-	case seg == nil || seg.Width <= 0 || seg.Height <= 0:
-		segError = "分割返回空结果"
-	case len(seg.Mask) != seg.Width*seg.Height:
-		segError = fmt.Sprintf("分割 mask 尺寸不一致：len=%d, %dx%d", len(seg.Mask), seg.Width, seg.Height)
-	default:
-		mask, maskW, maskH = seg.Mask, seg.Width, seg.Height
+	if params.BandWidth > 0 {
+		segStart := time.Now()
+		seg, segErr := s.sidecar.Segment(r.Context(), imgBytes)
+		segMs = milliseconds(time.Since(segStart))
+		switch {
+		case segErr != nil:
+			segError = segErr.Error()
+		case seg == nil || seg.Width <= 0 || seg.Height <= 0:
+			segError = "分割返回空结果"
+		case len(seg.Mask) != seg.Width*seg.Height:
+			segError = fmt.Sprintf("分割 mask 尺寸不一致：len=%d, %dx%d", len(seg.Mask), seg.Width, seg.Height)
+		default:
+			mask, maskW, maskH = seg.Mask, seg.Width, seg.Height
+		}
 	}
 
 	// 4) 深度 → 点云（几何与 ILC1 编码都在 Go 侧）。
