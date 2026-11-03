@@ -29,6 +29,7 @@
 | **[scope.md](scope.md)** | 主线定义、技术方案、分阶段、验证顺序 | 方向变了就改 |
 | **[selection.md](selection.md)** | **★ 选型与规范**：conda 隔离、模型选型、仓库结构、接口协议、相机约定、资源预算 | **施工依据** |
 | **[rendering-styles.md](rendering-styles.md)** | **★ 风格渲染完整清单**：三层结构、7 种风格、6 套预设、参数表、坑 | 新增风格就加 |
+| **[rendering-methods.md](rendering-methods.md)** | **★ 点云渲染范式清单 + 完成情况表**：55 项候选方法、状态跟踪、验收标准、实验登记 | 实现一项就改状态 |
 | **[go-scope.md](go-scope.md)** | Go 的职责边界与技术选型 | 职责变了就改 |
 
 ---
