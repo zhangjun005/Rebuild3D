@@ -330,6 +330,8 @@ export class Viewer {
   private colorPoints: THREE.Points | null = null;
   private depthPoints: THREE.Points | null = null;
   private readonly paperColor = new THREE.Color();
+  /** 画布底色（与纸色分开）：只用于清屏，不参与点着色 */
+  private readonly canvasBgColor = new THREE.Color();
   private readonly inkColor = new THREE.Color(INK_HEX);
 
   private rafId = 0;
@@ -1324,6 +1326,8 @@ export class Viewer {
     }
 
     this.paperColor.set(p.paper);
+    // 画布底色未显式设置时沿用纸色（保证预设观感不变）
+    this.canvasBgColor.set(p.bgColor ?? p.paper);
     this.pointUniforms.uPaper.value = this.paperColor;
     this.inkColor.set(p.ink);
 
@@ -1656,13 +1660,13 @@ export class Viewer {
     // ── 图像模式（不碰深度）：原图 → colorRT → 图像合成 pass ───────────────
     if (this.useImageMode()) {
       renderer.setRenderTarget(colorTarget);
-      renderer.setClearColor(this.paperColor, 1);
+      renderer.setClearColor(this.canvasBgColor, 1);
       renderer.clear();
       this.quadMesh.material = this.imageQuadMaterial;
       renderer.render(this.quadScene, this.quadCamera);
 
       renderer.setRenderTarget(null);
-      renderer.setClearColor(this.paperColor, 1);
+      renderer.setClearColor(this.canvasBgColor, 1);
       renderer.clear();
       this.imagePrintUniforms.tColor.value = colorTarget.texture;
       this.quadMesh.material = this.imagePrintMaterial;
@@ -1686,14 +1690,14 @@ export class Viewer {
 
     // ── 3. 颜色 pass ──────────────────────────────────────────────────────
     renderer.setRenderTarget(colorTarget);
-    renderer.setClearColor(this.paperColor, 1); // 背景 = 纸色
+    renderer.setClearColor(this.canvasBgColor, 1); // 背景 = 纸色
     colorPoints.visible = true;
     depthPoints.visible = false;
     renderer.render(this.scene, this.camera);
 
     // ── 4. 合成到屏幕 ─────────────────────────────────────────────────────
     renderer.setRenderTarget(null);
-    renderer.setClearColor(this.paperColor, 1);
+    renderer.setClearColor(this.canvasBgColor, 1);
     this.compositeUniforms.tColor.value = colorTarget.texture;
     this.compositeUniforms.tDepth.value = smoothTarget.texture;
     this.halftoneUniforms.tColor.value = colorTarget.texture;

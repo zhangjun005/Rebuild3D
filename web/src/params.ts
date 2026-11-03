@@ -110,6 +110,15 @@ export interface RenderParams {
   grain: number;
   /** 纸色 / 背景色（#rrggbb） */
   paper: string;
+  /**
+   * 画布底色（#rrggbb）—— 和纸色分开。
+   *
+   * paper 是「点缝里透出来的纸」，参与点的空隙混色；
+   * bgColor 是整张画布在没有任何点处的底色（导出图的底）。
+   * 想把作品放到深色/彩色底上时改这个，纸感不受影响。
+   * 未设置时等价于纸色。
+   */
+  bgColor: string;
   /** 墨色（#rrggbb）：duotone 的暗端 + 描边色 */
   ink: string;
 
@@ -231,6 +240,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
       engraving: 0.0,
       boil: false,
       paper: '#ffffff', // 纯白纸：暖纸色会吃掉颜色饱和度
+      bgColor: '#ffffff',
       colorMode: 1,
       colorPosterize: 5,
       colorHalftone: 0,
@@ -256,6 +266,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
       vignette: 0.28,
       grain: 0.03,
       paper: '#f2ece1',
+      bgColor: '#f2ece1',
       autoSway: true,
       swayAmplitude: 15,
     },
@@ -288,6 +299,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
       vignette: 0.16,
       grain: 0.02,
       paper: '#f6f2e8',
+      bgColor: '#f6f2e8',
       autoSway: true,
       swayAmplitude: 12,
     },
@@ -322,6 +334,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
       vignette: 0.2,
       grain: 0.03,
       paper: '#efe1c2', // 纸黄
+      bgColor: '#efe1c2',
       ink: '#2e1c10', // 墨褐
       autoSway: true,
       swayAmplitude: 12,
@@ -346,6 +359,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
       vignette: 0.2,
       grain: 0.02,
       paper: '#f4efe6',
+      bgColor: '#f4efe6',
       autoSway: false,
       swayAmplitude: 15,
     },
@@ -368,6 +382,7 @@ export const PRESETS: Record<PresetKey, Preset> = {
       vignette: 0.0,
       grain: 0.0,
       paper: '#14161a',
+      bgColor: '#14161a',
       autoSway: true,
       swayAmplitude: 15,
       // 调试档：用 3/4 视角看 fixture 的立体感

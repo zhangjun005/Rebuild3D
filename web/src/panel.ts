@@ -258,7 +258,11 @@ export class Panel {
     // ── 背景色（两列）──
     const colorGrid = document.createElement('div');
     colorGrid.className = 'grid2';
-    colorGrid.append(this.buildColor('paper', '背景 / 纸色'), this.buildColor('ink', '墨色'));
+    colorGrid.append(
+      this.buildColor('bgColor', '画布背景色'),
+      this.buildColor('paper', '纸色（点缝透出）'),
+      this.buildColor('ink', '墨色'),
+    );
     scrollArea.append(colorGrid);
 
     // ── 调试（非产品路径）────────────────────────────────────────────────────
@@ -404,7 +408,7 @@ export class Panel {
     return row;
   }
 
-  private buildColor(key: 'paper' | 'ink', labelText: string): HTMLElement {
+  private buildColor(key: 'paper' | 'ink' | 'bgColor', labelText: string): HTMLElement {
     const row = document.createElement('div');
     row.className = 'row color';
 
@@ -421,7 +425,7 @@ export class Panel {
 
     row.append(label, input);
     this.syncers.push(() => {
-      input.value = this.params[key];
+      input.value = this.params[key] ?? this.params.paper;
     });
     return row;
   }
