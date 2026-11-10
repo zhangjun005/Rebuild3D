@@ -1,5 +1,8 @@
 # 选型与规范
 
+<!-- @kron:intent geometry/orthographic-unprojection -->
+<!-- @kron:intent process/contract-flip-one-side -->
+
 > 状态：待确认（v1 开工前定稿）
 > 适用范围：插画 → 点云 → 风格渲染 主线（见 [scope.md](scope.md)）
 > **本文是施工依据。任何与技术选型冲突的临时决定，以本文为准或先改本文。**

@@ -1,5 +1,7 @@
 # 阶段小结 1
 
+<!-- @kron:intent process/evidence-first -->
+
 > 2026-11-01 · 从「旧工程已丢失」到「能跑通的插画风格化工具」
 > 39 次提交 · 3 位作者（Lead + go-core + web-render）· 0 次协作冲突
 

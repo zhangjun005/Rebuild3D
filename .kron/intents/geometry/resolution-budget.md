@@ -1,13 +1,14 @@
 <!-- kron:frontmatter -->
 created_by: '@zhangjun005'
-updated_at: 2026-11-01T11:52:38.2408205Z
+updated_at: 2026-11-10T12:59:59.1712058Z
 status: active
 assumptions:
     - id: depth-semantics-resolution-independent
       severity: hard
-      rationale: 若破裂则提分辨率就能提升深度质量，优先级要整个反过来
-      verified_at: "2026-11-01"
-      verified_by: '@zhangjun005'
+      rationale: 为“提高采样密度”划一条无效边界：有些短板靠它补不了，缺这条就会调错方向。
+    - id: process-res-controls-edge-quality
+      severity: hard
+      rationale: 它是当前默认档位的唯一依据；把“可救”与“不可救”两类现象分开，避免两条结论互相覆盖。
 <!-- /kron:frontmatter -->
 # 分辨率预算是「双闸门」：process_res 与 max_points 必须一起提
 

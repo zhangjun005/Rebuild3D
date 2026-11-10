@@ -1,5 +1,10 @@
 # 点云渲染范式清单 · 完成情况表
 
+<!-- @kron:intent render/camera-fov-ortho -->
+<!-- @kron:intent render/canvas-vs-paper -->
+
+<!-- @kron:intent render/methods-inventory -->
+
 > **这份文档的用途**：把所有可尝试的点云渲染方式**先列全**，用统一编号 + 状态列跟踪实现进度。
 > 目标不是"提高画质"，而是**探索多种渲染范式**，找出值得做成产品的几种。
 >

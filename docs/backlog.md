@@ -1,5 +1,7 @@
 # 未完成清单
 
+<!-- @kron:intent render/methods-inventory -->
+
 > 盘点时间：2026-11-01 晚 · 基线 60 次提交
 > 用途：这是「还剩什么」的唯一权威清单。做完一项就更新这里，不要靠记忆。
 > 已完成的部分见 [milestone-1.md](milestone-1.md)。
