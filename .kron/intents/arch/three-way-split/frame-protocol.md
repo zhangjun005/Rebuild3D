@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:45.4039356Z
 <!-- /kron:frontmatter -->
-# frame protocol desync
+# Go↔Python 帧协议：成对消费与失步修复
 
 > One-line summary of this intent's decision.
 

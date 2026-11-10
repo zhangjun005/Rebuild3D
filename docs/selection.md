@@ -1,6 +1,6 @@
 # 选型与规范
 
-<!-- @kron:intent geometry/orthographic-unprojection -->
+<!-- @kron:intent geometry/projection/orthographic -->
 <!-- @kron:intent process/contract-flip-one-side -->
 
 > 状态：待确认（v1 开工前定稿）

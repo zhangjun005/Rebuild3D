@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:59:18.4468451Z
 <!-- /kron:frontmatter -->
-# halftone screen
+# 屏幕空间半调网点
 
 > One-line summary of this intent's decision.
 

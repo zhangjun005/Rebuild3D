@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:57.1993599Z
 <!-- /kron:frontmatter -->
-# diagnostic discipline
+# 诊断脚本的轮询纪律
 
 > One-line summary of this intent's decision.
 

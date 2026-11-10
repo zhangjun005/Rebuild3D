@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-01T12:15:07.1971578Z
 <!-- /kron:frontmatter -->
-# output stills only
+# 只输出静态图片
 
 > One-line summary of this intent's decision.
 

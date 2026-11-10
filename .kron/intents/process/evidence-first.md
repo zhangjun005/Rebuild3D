@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:57.2774302Z
 <!-- /kron:frontmatter -->
-# evidence first
+# 先量后说：指标本身可能失效
 
 > One-line summary of this intent's decision.
 

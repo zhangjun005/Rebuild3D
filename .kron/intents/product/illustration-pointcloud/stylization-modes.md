@@ -29,7 +29,7 @@ assumptions:
 
 ### 第二层：这幅画该怎么读？
 
-详见 `render/ink-mapping`：
+详见 `render/style-layering/ink-mapping`：
 
 - **墨量映射**：按亮度 / 按局部结构 / **按深度**
 - **主体极性**：自动 / 亮主体 / 暗主体

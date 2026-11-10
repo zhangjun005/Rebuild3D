@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:57.5389946Z
 <!-- /kron:frontmatter -->
-# mask thresholds
+# 分割 mask 不能用窄带三档阈值
 
 > One-line summary of this intent's decision.
 

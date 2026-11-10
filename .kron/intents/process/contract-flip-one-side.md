@@ -6,7 +6,7 @@ assumptions:
       severity: hard
       rationale: 这个约定是“只能在一侧修”的对象：它同时约束 Go 的反投影和浏览器的相机，所以发现方向反了时必须先确认是哪一侧错了，而不是两边都改。
 <!-- /kron:frontmatter -->
-# contract flip one side
+# 跨边界约定只能翻一侧
 
 > One-line summary of this intent's decision.
 

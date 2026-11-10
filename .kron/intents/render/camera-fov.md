@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:45.2353833Z
 <!-- /kron:frontmatter -->
-# camera fov ortho
+# FOV 与模型无关：越小越接近正交
 
 > One-line summary of this intent's decision.
 

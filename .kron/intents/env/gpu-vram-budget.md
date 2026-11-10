@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:56.9680823Z
 <!-- /kron:frontmatter -->
-# gpu vram budget
+# 8GB 显存与 process_res 的换算表
 
 > One-line summary of this intent's decision.
 

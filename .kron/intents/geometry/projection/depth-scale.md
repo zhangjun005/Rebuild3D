@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:35.1525959Z
 <!-- /kron:frontmatter -->
-# depth scale relief
+# z 轴压缩：正交下的浮雕厚度
 
 > One-line summary of this intent's decision.
 

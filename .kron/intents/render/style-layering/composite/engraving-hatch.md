@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:59:18.526562Z
 <!-- /kron:frontmatter -->
-# engraving hatch
+# 铜版交叉排线（与网点互斥）
 
 > One-line summary of this intent's decision.
 

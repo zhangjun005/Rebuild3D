@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:57.618587Z
 <!-- /kron:frontmatter -->
-# scope cuts
+# 主动砍掉的范围
 
 > One-line summary of this intent's decision.
 

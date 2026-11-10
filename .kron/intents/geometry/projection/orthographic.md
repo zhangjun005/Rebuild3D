@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:35.0770008Z
 <!-- /kron:frontmatter -->
-# orthographic unprojection
+# 正交反投影：没有内参就不假装有相机
 
 > One-line summary of this intent's decision.
 

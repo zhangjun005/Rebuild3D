@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:57.1229049Z
 <!-- /kron:frontmatter -->
-# screenshot harness
+# shot.cjs：唯一取证工具
 
 > One-line summary of this intent's decision.
 

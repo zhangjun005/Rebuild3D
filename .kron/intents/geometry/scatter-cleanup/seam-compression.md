@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:35.2308017Z
 <!-- /kron:frontmatter -->
-# seam compression iqr
+# 深度缝合压缩：同层 IQR 判据
 
 > One-line summary of this intent's decision.
 

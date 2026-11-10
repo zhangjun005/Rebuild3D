@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-01T12:15:07.2777804Z
 <!-- /kron:frontmatter -->
-# workres decoupling
+# 工作分辨率与 max_points 解耦
 
 > One-line summary of this intent's decision.
 

@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:45.5601244Z
 <!-- /kron:frontmatter -->
-# segmentation chain
+# 角色分割链路（预留，未用于渲染）
 
 > One-line summary of this intent's decision.
 

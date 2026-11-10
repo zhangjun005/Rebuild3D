@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:34.9966677Z
 <!-- /kron:frontmatter -->
-# relative depth no intrinsics
+# DA3 输出的是相对深度，且没有相机内参
 
 > One-line summary of this intent's decision.
 

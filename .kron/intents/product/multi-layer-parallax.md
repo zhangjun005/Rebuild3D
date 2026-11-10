@@ -51,5 +51,5 @@ status: draft
 ## 与现有意图的关系
 
 - 依赖 `product/depth-go-no-go` 的实测结论
-- 与 `render/density-as-style` 无冲突：一个管"点怎么画"，一个管"层怎么动"
+- 与 `render/style-layering/density-as-style` 无冲突：一个管"点怎么画"，一个管"层怎么动"
 - 若实现，`arch/three-way-split` 的三段式不变（Python 出深度、Go 分层、浏览器渲染）

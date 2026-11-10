@@ -53,7 +53,7 @@
 | **surfel / EWA splatting** | `kron: render/method-provenance` | 每点带世界半径投影成屏幕圆盘。从根上消除点缝，可取代「点大小」参数 |
 | **多层 2.5D 视差** | `kron: product/multi-layer-parallax`（draft） | 用户明确「只记录，先不推进」 |
 | **点大小随视角补偿** | 未记录 | 侧视时点径 ×1/cos θ，让侧面更实 |
-| **脸部细节** | `kron: geometry/point-count-budget` | 依赖「点数档位」，本质是颜色采样密度 |
+| **脸部细节** | `kron: geometry/sampling/point-count-budget` | 依赖「点数档位」，本质是颜色采样密度 |
 
 ---
 

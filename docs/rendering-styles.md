@@ -1,7 +1,7 @@
 # 渲染风格清单
 
 <!-- @kron:intent render/style-layering -->
-<!-- @kron:intent render/primitive-layer-ceiling -->
+<!-- @kron:intent render/style-layering/primitive-layer -->
 
 > **目的：固化下来以免后面忘记。** 这是"插画点云风格渲染"这条线的**价值核心**——数据管线是苦活，风格才是卖点。
 > 补：本清单只列手段，不列取舍。取舍见 [scope.md](scope.md) 阶段 P0/P3。

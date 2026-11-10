@@ -25,7 +25,7 @@ assumptions:
       verified_by: '@zhangjun005'
 depends_on:
     - product/illustration-pointcloud
-    - geometry/depth-model-choice
+    - geometry/depth-model/choice
 <!-- /kron:frontmatter -->
 # go/no-go 结果：条件性通过
 
@@ -73,7 +73,7 @@ depends_on:
 ## 没变的部分
 
 **点云风格渲染本身完全成立。** 点云的"厚度感"主要来自点大小、密度、描边、空气透视，
-不是几何精度——而这一层已经验证过了（见 `render/style-layering`、`render/density-as-style`）。
+不是几何精度——而这一层已经验证过了（见 `render/style-layering`、`render/style-layering/density-as-style`）。
 
 ## 下一步
 

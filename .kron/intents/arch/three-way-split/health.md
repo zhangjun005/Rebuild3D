@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:45.4830729Z
 <!-- /kron:frontmatter -->
-# health must be honest
+# health 必须如实反映可用性
 
 > One-line summary of this intent's decision.
 

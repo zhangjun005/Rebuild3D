@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:56.8668416Z
 <!-- /kron:frontmatter -->
-# disk budget
+# C 盘预算：缓存与模型全部落 E 盘
 
 > One-line summary of this intent's decision.
 

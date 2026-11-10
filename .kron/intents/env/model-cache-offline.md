@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:57.0450493Z
 <!-- /kron:frontmatter -->
-# model cache offline
+# 权重走本地快照，断网也能跑
 
 > One-line summary of this intent's decision.
 

@@ -9,6 +9,7 @@ assumptions:
       severity: hard
       rationale: 如果插画的深度输出不可用，几何点云方案要整体退回 2.5D 分层视差，技术方案与阶段计划全改
 <!-- /kron:frontmatter -->
+
 # 主线：插画 → 点云 → 风格化渲染
 
 > 一张插画进，一个能转能动、有画风的东西出。目标是"好看"，不是"准确"。
@@ -39,3 +40,15 @@ assumptions:
 
 - **A 方向（户型/尺寸）**：没有废弃，留在 `docs/archive`。深度引擎共用，随时可切回，go/no-go 只要 1 天
 - **单品转台（360°）**：技术上同一条链路，但观感不如 3DGS、卖相不够，放到 v2
+
+---
+
+## 子意图（细节）
+
+| 子意图 | 它负责的细节 |
+|---|---|
+| `product/illustration-pointcloud/stylization-modes` | 风格化输出分三层，不是一层 |
+| `product/illustration-pointcloud/output-stills-only` | 只输出静态图片 |
+| `product/illustration-pointcloud/scope-cuts` | 主动砍掉了什么 |
+
+> 子意图之间是**并列的细节**，不是执行顺序。执行/推导顺序用 frontmatter 的 `depends_on` 表达。

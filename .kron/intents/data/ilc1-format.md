@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:57.4496953Z
 <!-- /kron:frontmatter -->
-# ilc1 format
+# ILC1 点云格式：8+15n 字节，零拷贝直传
 
 > One-line summary of this intent's decision.
 

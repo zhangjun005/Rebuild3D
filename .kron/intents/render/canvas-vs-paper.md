@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:45.1450534Z
 <!-- /kron:frontmatter -->
-# canvas vs paper
+# 画布底色与纸色是两个概念
 
 > One-line summary of this intent's decision.
 

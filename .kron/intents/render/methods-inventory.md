@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:45.057907Z
 <!-- /kron:frontmatter -->
-# methods inventory
+# 点云渲染范式清单与完成情况表
 
 > One-line summary of this intent's decision.
 

@@ -5,6 +5,7 @@ status: active
 depends_on:
     - product/illustration-pointcloud
 <!-- /kron:frontmatter -->
+
 # 风格化拆成三层
 
 > L1 基元（一个点画成什么）/ L2 风格（画面是什么画风）/ L3 时间（动起来的质感），三层正交组合。
@@ -34,3 +35,16 @@ depends_on:
 ## 备选（Alternatives）
 
 - 只做一种风格、做到极致（例如只做点画）：更聚焦，但放弃了"预设可组合"的可玩性
+
+---
+
+## 子意图（细节）
+
+| 子意图 | 它负责的细节 |
+|---|---|
+| `render/style-layering/primitive-layer` | L1 基元：决定渲染上限 |
+| `render/style-layering/ink-mapping` | L3 墨量跟随结构，不跟随绝对亮度 |
+| `render/style-layering/density-as-style` | 点密度是风格参数，不是质量指标 |
+| `render/style-layering/composite` | 合成层：半调/排线/描边（总） |
+
+> 子意图之间是**并列的细节**，不是执行顺序。执行/推导顺序用 frontmatter 的 `depends_on` 表达。

@@ -1,6 +1,6 @@
 # 点云渲染范式清单 · 完成情况表
 
-<!-- @kron:intent render/camera-fov-ortho -->
+<!-- @kron:intent render/camera-fov -->
 <!-- @kron:intent render/canvas-vs-paper -->
 
 <!-- @kron:intent render/methods-inventory -->

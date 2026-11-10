@@ -19,6 +19,7 @@ assumptions:
 depends_on:
     - product/illustration-pointcloud
 <!-- /kron:frontmatter -->
+
 # 三段式职责切分：Python / Go / 浏览器
 
 > Python 只做推理，Go 做几何与服务，渲染只在浏览器。两条边界分别是 stdio 管道和 HTTP。
@@ -66,3 +67,14 @@ Go 侧**尽量零第三方依赖**：标准库 `net/http` + Go 1.22+ 的 `ServeM
 - **全 Python**：生态最好，但部署重（依赖树大）、且不是主语言
 - **全 Go**：跑不了模型。`onnxruntime-go` 要 CGO，且 DINOv2 变体 + 自定义 head 导出 ONNX 极痛苦
 - **Go → WASM 把几何跑在浏览器**（`seqsense/pcdeditor` 的路子）：v1 不需要，但为"自包含 HTML 可编辑"留了门
+
+---
+
+## 子意图（细节）
+
+| 子意图 | 它负责的细节 |
+|---|---|
+| `arch/three-way-split/frame-protocol` | 管道纪律：请求响应必须成对消费，失步要能重建 |
+| `arch/three-way-split/health` | 不可用必须报 ready=false |
+
+> 子意图之间是**并列的细节**，不是执行顺序。执行/推导顺序用 frontmatter 的 `depends_on` 表达。

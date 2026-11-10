@@ -45,7 +45,7 @@ status: active
 ## 权衡
 
 - 点云会「不均匀」——平坦区变稀疏。对墨/纸系风格这是对的（本来就要留纸），但要点云本身几何均匀的场合不适用
-- 与 `geometry/resolution-budget` 互补：那个决定「可选点的精度上限」，这个决定「怎么分配」
+- 与 `geometry/sampling/resolution-budget` 互补：那个决定「可选点的精度上限」，这个决定「怎么分配」
 
 ## 备选（若不够）
 

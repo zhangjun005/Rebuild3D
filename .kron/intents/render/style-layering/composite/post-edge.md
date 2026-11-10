@@ -2,7 +2,7 @@
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:59:18.6145327Z
 <!-- /kron:frontmatter -->
-# post edge
+# 深度 Sobel 描边
 
 > One-line summary of this intent's decision.
 

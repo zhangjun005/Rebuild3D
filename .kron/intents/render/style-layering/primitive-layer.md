@@ -6,7 +6,7 @@ assumptions:
       severity: soft
       rationale: 点大小与软边都是非单调的：太小→画面变淡，太大→糊；硬边反而最淡（点缝全露纸色）。所以调参不能靠单调外推，必须成对看观感。
 <!-- /kron:frontmatter -->
-# primitive layer ceiling
+# L1 基元决定渲染上限
 
 > One-line summary of this intent's decision.
 
