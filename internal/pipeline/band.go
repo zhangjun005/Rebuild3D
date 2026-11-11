@@ -1,3 +1,5 @@
+// @kron:intent geometry/scatter-cleanup/seam-compression
+
 package pipeline
 
 import (

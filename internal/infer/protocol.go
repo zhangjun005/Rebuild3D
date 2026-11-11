@@ -1,3 +1,6 @@
+// @kron:intent arch/three-way-split/frame-protocol
+// @kron:intent geometry/segmentation
+
 // Package infer 实现 Go ↔ Python sidecar 的 stdio 帧协议客户端（docs/selection.md §4.1）。
 //
 // 帧结构（全小端，请求与响应都带 4 字节长度前缀）：

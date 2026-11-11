@@ -1,3 +1,4 @@
+// @kron:intent data/ilc1-format
 /**
  * ILC1 点云解析 —— docs/selection.md §4.2 的内部传输格式。
  *

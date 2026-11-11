@@ -1,3 +1,5 @@
+// @kron:intent arch/three-way-split/frame-protocol
+
 package infer
 
 import (

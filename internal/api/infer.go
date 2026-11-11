@@ -1,3 +1,6 @@
+// @kron:intent arch/three-way-split
+// @kron:intent geometry/segmentation
+
 package api
 
 import (

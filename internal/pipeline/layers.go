@@ -1,3 +1,5 @@
+// @kron:intent geometry/scatter-cleanup/layer-quantization
+
 package pipeline
 
 import "sort"

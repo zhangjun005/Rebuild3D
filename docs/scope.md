@@ -1,6 +1,7 @@
 # 范围与主线：插画 → 点云 → 风格化渲染
 
 <!-- @kron:intent product/illustration-pointcloud/scope-cuts -->
+<!-- @kron:intent product/multi-layer-parallax -->
 
 > 状态：已决策（2026-11）
 > 影响：主线从「空间采集 / 户型」（[01](archive/01-product-v1.md)、[02](archive/02-direction-expansion.md) 的 A 方向）转为**插画点云风格渲染**。

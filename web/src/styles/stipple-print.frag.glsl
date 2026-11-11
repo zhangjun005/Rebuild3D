@@ -1,3 +1,4 @@
+// @kron:intent render/style-layering/primitive-layer
 // ─────────────────────────────────────────────────────────────────────────────
 // 「点画印刷」stipple-print 的 fragment 端
 //

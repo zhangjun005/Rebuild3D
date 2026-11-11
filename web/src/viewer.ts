@@ -1,3 +1,11 @@
+// @kron:intent render/style-layering
+// @kron:intent render/camera-fov
+// @kron:intent render/canvas-vs-paper
+// @kron:intent render/style-layering/ink-mapping
+// @kron:intent render/style-layering/density-as-style
+// @kron:intent render/style-layering/composite/halftone-screen
+// @kron:intent render/style-layering/composite/engraving-hatch
+// @kron:intent render/style-layering/composite/post-edge
 /**
  * 渲染核心 —— 四 pass 的点画印刷管线。
  *

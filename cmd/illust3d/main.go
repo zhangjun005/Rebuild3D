@@ -1,3 +1,6 @@
+// @kron:intent arch/three-way-split
+// @kron:intent env/conda-isolation
+
 // Command illust3d 是本项目的唯一入口：插画 → 点云 → 风格化渲染。
 //
 // 服务接口（单二进制，标准库 net/http）：

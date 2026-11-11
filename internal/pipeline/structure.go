@@ -1,3 +1,6 @@
+// @kron:intent geometry/sampling/structure-aware
+// @kron:intent geometry/sampling/workres
+
 package pipeline
 
 import (

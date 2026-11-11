@@ -1,3 +1,4 @@
+// @kron:intent tooling/diagnostic-discipline
 // 诊断脚本：走**真实上传路径**（模拟用户点「选择插画」），不是直接 loadILC1。
 // 目的：判断「上传后卡住 / 没有反馈 / 不能转」到底是哪一段的问题。
 //

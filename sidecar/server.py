@@ -1,4 +1,6 @@
 #!/usr/bin/env python
+# @kron:intent arch/three-way-split/frame-protocol
+# @kron:intent geometry/segmentation
 """illust3d 的 Python 推理 sidecar —— 常驻子进程，走 stdio 帧协议。
 
 **它不是 HTTP 服务，不监听任何端口。** 由 Go 用 os/exec 拉起，通过 stdin/stdout 通信。

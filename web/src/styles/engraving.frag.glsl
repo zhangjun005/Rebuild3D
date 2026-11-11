@@ -1,3 +1,4 @@
+// @kron:intent render/style-layering/composite/engraving-hatch
 // ─────────────────────────────────────────────────────────────────────────────
 // 「铜版画」engraving 的合成 pass（§2.2 排线 + §7 第 2 套）
 //

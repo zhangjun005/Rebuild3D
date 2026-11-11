@@ -1,3 +1,6 @@
+// @kron:intent geometry/sampling/point-count-budget
+// @kron:intent geometry/sampling/resolution-budget
+
 // Package pipeline 把"深度图 + 原图"变成可直接下发浏览器的 ILC1 点云。
 //
 // 两种采样模式（docs/selection.md §4.4 的相机约定，两种通用）：

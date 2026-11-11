@@ -1,6 +1,7 @@
 # Rebuild3D · 决策文档
 
 <!-- @kron:intent product/illustration-pointcloud -->
+<!-- @kron:intent env/disk-budget -->
 
 这个目录只放**决策与规范**，不放代码说明。目的：半年后回来看，能知道"当初为什么这么定"。
 

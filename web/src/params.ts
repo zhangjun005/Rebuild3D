@@ -1,3 +1,4 @@
+// @kron:intent product/illustration-pointcloud/stylization-modes
 /**
  * 渲染参数 —— 与 docs/rendering-styles.md §6 的参数清单对齐。
  *

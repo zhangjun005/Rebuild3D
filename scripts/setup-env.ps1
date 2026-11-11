@@ -1,3 +1,5 @@
+# @kron:intent env/conda-isolation
+# @kron:intent env/disk-budget
 <#
 .SYNOPSIS
     建立 illust3d 的隔离环境。幂等，可反复运行。

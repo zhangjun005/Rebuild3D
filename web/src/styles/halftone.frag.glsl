@@ -1,3 +1,4 @@
+// @kron:intent render/style-layering/composite/halftone-screen
 // ─────────────────────────────────────────────────────────────────────────────
 // 「半调漫画」halftone-manga 的合成 pass（L2 半调 + 深度描边 + L4 暗角/颗粒）
 //

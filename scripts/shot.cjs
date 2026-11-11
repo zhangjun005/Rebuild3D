@@ -1,3 +1,4 @@
+// @kron:intent tooling/screenshot-harness
 // 本机截图 + 渲染验证工具：用系统装的 Microsoft Edge。
 // （Playwright MCP 默认去找 Chrome，本机没装，所以这里直接 require playwright 并指定 channel=msedge）
 //

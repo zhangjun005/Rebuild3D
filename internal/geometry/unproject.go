@@ -1,3 +1,7 @@
+// @kron:intent geometry/projection/orthographic
+// @kron:intent geometry/projection/depth-scale
+// @kron:intent geometry/projection/z-sign
+
 package geometry
 
 import "math"

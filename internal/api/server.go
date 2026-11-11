@@ -1,3 +1,5 @@
+// @kron:intent arch/three-way-split
+
 // Package api 提供 Go 侧的 HTTP 服务：健康检查、点云 fixture 下发、推理接口、静态资源。
 //
 // 路由用标准库 net/http + ServeMux（Go 1.22+ 的 method/pattern 语法，不引入 chi，

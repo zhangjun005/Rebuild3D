@@ -1,3 +1,5 @@
+# @kron:intent data/mask-thresholds
+# @kron:intent geometry/segmentation
 """动漫角色分割引擎（anime-seg / isnet_is）。
 
 用途：给点云管线提供「角色 / 背景」语义分类，进而计算边界带。

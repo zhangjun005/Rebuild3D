@@ -1,3 +1,5 @@
+// @kron:intent data/ilc1-format
+
 // Package cloud 定义点云的内部表示，以及 Go ↔ 浏览器之间的 ILC1 二进制编解码。
 //
 // ILC1 格式（docs/selection.md §4.2，全部小端）：

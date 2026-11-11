@@ -1,3 +1,7 @@
+// @kron:intent arch/three-way-split/health
+// @kron:intent env/gpu-vram-budget
+// @kron:intent geometry/sampling/resolution-budget
+
 package infer
 
 import (
