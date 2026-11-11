@@ -7,7 +7,8 @@ status: active
 <!-- /kron:frontmatter -->
 # 环境隔离：只用 conda env
 
-> 单独 conda env `illust3d`（Python 3.10），绝不向 base / 全局 Python 安装；所有缓存与模型落 E 盘。
+> > 单独 conda env `illust3d`（Python 3.10），绝不向 base / 全局 Python 安装；所有缓存与模型落 E 盘。
+
 
 ## 为什么（Why）
 

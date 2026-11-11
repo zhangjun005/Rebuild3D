@@ -1,10 +1,12 @@
 <!-- kron:frontmatter -->
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T13:58:01.3392363Z
+status: active
 <!-- /kron:frontmatter -->
 # 深度模型选型（总）
 
-> 选 DA3MONO-LARGE，并接受它只有相对深度这个事实。
+> > 选 DA3MONO-LARGE，并接受它只有相对深度这个事实。
+
 
 ## 这个节点（总）
 

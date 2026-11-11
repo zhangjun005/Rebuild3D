@@ -1,10 +1,12 @@
 <!-- kron:frontmatter -->
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T13:58:01.5787064Z
+status: active
 <!-- /kron:frontmatter -->
 # 散落点清理（总）
 
-> 只压线稿缝合处的伪影，不压真实台阶。
+> > 只压线稿缝合处的伪影，不压真实台阶。
+
 
 ## 这个节点（总）
 

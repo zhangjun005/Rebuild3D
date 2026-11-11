@@ -6,7 +6,8 @@ status: active
 
 # geometry：数据管线
 
-> 从插画到可渲染点云：深度模型选型、反投影、清洗、重采样。
+> > 从插画到可渲染点云：深度模型选型、反投影、清洗、重采样。
+
 
 ## 模块边界
 
@@ -25,5 +26,6 @@ status: active
 | `geometry/sampling` | 选哪些点、选多少（总） |
 | `geometry/scatter-cleanup` | 层间散落点怎么清（总） |
 | `geometry/segmentation` | 角色分割链路（预留，尚未用于渲染） |
+| `geometry/hole-filling` | 补洞（LaMa，引擎已写未接入；draft） |
 
 > 子意图之间是**并列的细节**，不是执行顺序。执行/推导顺序用 frontmatter 的 `depends_on` 表达。

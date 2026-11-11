@@ -1,10 +1,12 @@
 <!-- kron:frontmatter -->
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T13:58:01.5007131Z
+status: active
 <!-- /kron:frontmatter -->
 # 采样策略（总）
 
-> 点数买覆盖率，分辨率买可分辨结构，两者分开调。
+> > 点数买覆盖率，分辨率买可分辨结构，两者分开调。
+
 
 ## 这个节点（总）
 

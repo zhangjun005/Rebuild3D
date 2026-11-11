@@ -1,10 +1,12 @@
 <!-- kron:frontmatter -->
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T13:58:01.4227365Z
+status: active
 <!-- /kron:frontmatter -->
 # 反投影方式（总）
 
-> 用正交反投影，不用透视——因为模型没有相机。
+> > 用正交反投影，不用透视——因为模型没有相机。
+
 
 ## 这个节点（总）
 
@@ -18,5 +20,6 @@ updated_at: 2026-11-10T13:58:01.4227365Z
 | `geometry/projection/orthographic` | 主决策：正交反投影（可混合透视） |
 | `geometry/projection/depth-scale` | z 轴压缩 = 浮雕厚度 |
 | `geometry/projection/z-sign` | z = -d 的符号约定修正 |
+| `geometry/projection/perspective` | 已废弃：透视反投影（superseded） |
 
 > 子意图之间是**并列的细节**，不是执行顺序。执行/推导顺序用 frontmatter 的 `depends_on` 表达。

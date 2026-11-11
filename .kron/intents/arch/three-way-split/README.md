@@ -22,7 +22,9 @@ depends_on:
 
 # 三段式职责切分：Python / Go / 浏览器
 
-> Python 只做推理，Go 做几何与服务，渲染只在浏览器。两条边界分别是 stdio 管道和 HTTP。
+> > Python 只做推理，Go 做几何与服务，渲染只在浏览器。
+
+两条边界分别是 stdio 管道和 HTTP。
 
 ## 为什么（Why）
 

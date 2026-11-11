@@ -1,4 +1,6 @@
 """LaMa 补洞引擎（big-lama，ONNX + onnxruntime）。
+# @kron:intent geometry/hole-filling
+# @kron:assumes lama-cpu-speed-acceptable
 
 用途：把角色抠掉之后，补出它后面的背景。
 这是分层 2.5D 的关键一步——原图里被角色挡住的那部分像素**根本不存在**，

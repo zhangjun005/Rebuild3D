@@ -12,7 +12,9 @@ assumptions:
 
 # 主线：插画 → 点云 → 风格化渲染
 
-> 一张插画进，一个能转能动、有画风的东西出。目标是"好看"，不是"准确"。
+> > 一张插画进，一个能转能动、有画风的东西出。
+
+目标是"好看"，不是"准确"。
 
 ## 为什么（Why）
 
@@ -50,5 +52,6 @@ assumptions:
 | `product/illustration-pointcloud/stylization-modes` | 风格化输出分三层，不是一层 |
 | `product/illustration-pointcloud/output-stills-only` | 只输出静态图片 |
 | `product/illustration-pointcloud/scope-cuts` | 主动砍掉了什么 |
+| `product/illustration-pointcloud/video-output` | 已废弃：GIF/视频导出（superseded） |
 
 > 子意图之间是**并列的细节**，不是执行顺序。执行/推导顺序用 frontmatter 的 `depends_on` 表达。

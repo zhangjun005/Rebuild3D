@@ -1,5 +1,6 @@
 // @kron:intent product/illustration-pointcloud
 // @kron:intent product/illustration-pointcloud/output-stills-only
+// @kron:intent product/illustration-pointcloud/video-output
 /**
  * illust3d 渲染层入口。
  *

@@ -1,6 +1,9 @@
 // @kron:intent geometry/projection/orthographic
 // @kron:intent geometry/projection/depth-scale
 // @kron:intent geometry/projection/z-sign
+// @kron:intent geometry/projection/perspective
+// @kron:assumes depth-sign-convention
+// @kron:assumes illustration-uses-orthographic-projection
 
 package geometry
 

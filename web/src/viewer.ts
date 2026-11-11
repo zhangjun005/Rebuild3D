@@ -6,6 +6,8 @@
 // @kron:intent render/style-layering/composite/halftone-screen
 // @kron:intent render/style-layering/composite/engraving-hatch
 // @kron:intent render/style-layering/composite/post-edge
+// @kron:intent render/style-layering/composite/world-space-halftone
+// @kron:assumes pointcloud-carries-lineart-in-color
 /**
  * 渲染核心 —— 四 pass 的点画印刷管线。
  *

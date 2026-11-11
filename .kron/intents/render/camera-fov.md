@@ -1,21 +1,10 @@
 <!-- kron:frontmatter -->
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:45.2353833Z
+status: active
 <!-- /kron:frontmatter -->
 # FOV 与模型无关：越小越接近正交
 
-> One-line summary of this intent's decision.
+> FOV 与模型**完全无关**（模型没给内参），它纯粹是"怎么看"，所以是可调的艺术参数，默认 3°。
 
-## Why
-
-Record the reason for this decision.
-
-## Trade-offs
-
-What was chosen and what was given up.
-
-<!-- 边界假设写在 frontmatter 的 assumptions 字段里，不在正文重复 -->
-
-## Why
-
-FOV 与模型**完全无关**（模型没给内参），它纯粹是"怎么看"，所以是可调的艺术参数，默认 3°。原因是透视相机会把远层再缩放一次，叠加透视反投影就成了以视点为中心的放射扇：FOV 42° 时取景距离≈1.0 而点云 z 跨度 1.21，远近层大小差约 2.1 倍；FOV 4° 差约 12%；FOV 1° 差约 3%。实测 1~3° 时正面画面等同原图、角色无形变。改 FOV 必须**重新套框**（取景距离 ∝ 1/tan(fov/2)，42°→1° 要放大 40 倍），否则只看到一小块——这个 bug 已经踩过一次。
+原因是透视相机会把远层再缩放一次，叠加透视反投影就成了以视点为中心的放射扇：FOV 42° 时取景距离≈1.0 而点云 z 跨度 1.21，远近层大小差约 2.1 倍；FOV 4° 差约 12%；FOV 1° 差约 3%。实测 1~3° 时正面画面等同原图、角色无形变。改 FOV 必须**重新套框**（取景距离 ∝ 1/tan(fov/2)，42°→1° 要放大 40 倍），否则只看到一小块——这个 bug 已经踩过一次。

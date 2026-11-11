@@ -6,7 +6,8 @@ status: active
 
 # env：运行环境
 
-> 单独 conda env `illust3d`，不碰 base；所有缓存与模型落 E 盘。
+> > 单独 conda env `illust3d`，不碰 base；所有缓存与模型落 E 盘。
+
 
 ## 模块边界
 

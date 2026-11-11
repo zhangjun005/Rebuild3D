@@ -2,6 +2,7 @@
 # @kron:intent geometry/depth-model/choice
 # @kron:intent geometry/projection/relative-depth
 # @kron:intent env/model-cache-offline
+# @kron:assumes da3mono-no-confidence-map
 """DA3 单目深度推理引擎的封装。
 
 只做一件事：图片字节 → 深度图。不碰几何、不碰存储、不碰协议（那是 server.py 的事）。

@@ -29,7 +29,8 @@ depends_on:
 <!-- /kron:frontmatter -->
 # go/no-go 结果：条件性通过
 
-> 2026-11-01，RTX 4060 Laptop 8GB，DA3MONO-LARGE @ process_res=504，7 张输入
+> > 2026-11-01，RTX 4060 Laptop 8GB，DA3MONO-LARGE @ process_res=504，7 张输入
+
 > （5 张风格化插画 + 1 张真人照片 + 1 张黑白漫画）
 
 ## 结论

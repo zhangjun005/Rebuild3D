@@ -1,11 +1,15 @@
 <!-- kron:frontmatter -->
 created_by: '@zhangjun005'
-updated_at: 2026-11-02T07:18:41.4899353Z
-status: active
+updated_at: 2026-11-11T05:19:29.277988Z
+status: superseded
+references:
+    - geometry/scatter-cleanup/seam-compression
 <!-- /kron:frontmatter -->
 # 深度层量化：消除层间"拉丝"散落点云
 
-> 同时是 `product/multi-layer-parallax` 的地基。已实现于 `internal/pipeline/layers.go`。
+> > 同时是 `product/multi-layer-parallax` 的地基。
+
+已实现于 `internal/pipeline/layers.go`。
 
 ## 问题（2026-11-01 实测）
 

@@ -1,10 +1,12 @@
 <!-- kron:frontmatter -->
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:34.8994475Z
+status: active
 <!-- /kron:frontmatter -->
 # data：跨段数据（总）
 
-> 整条链路只有两份跨进程数据：ILC1 点云与 sidecar 帧。
+> > 整条链路只有两份跨进程数据：ILC1 点云与 sidecar 帧。
+
 
 ## 模块边界
 

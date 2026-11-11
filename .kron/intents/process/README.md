@@ -1,10 +1,12 @@
 <!-- kron:frontmatter -->
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:34.8132792Z
+status: active
 <!-- /kron:frontmatter -->
 # process：做决定的方法（总）
 
-> 怎么判断一个改动是真的变好。
+> > 怎么判断一个改动是真的变好。
+
 
 ## 模块边界
 

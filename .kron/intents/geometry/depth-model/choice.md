@@ -21,7 +21,9 @@ depends_on:
 <!-- /kron:frontmatter -->
 # 深度模型选 DA3MONO-LARGE
 
-> 单图场景用 `DA3MONO-LARGE`（0.35B，Apache-2.0），备选 `DA3-SMALL`，以及带天空分割的 `DA3METRIC-LARGE`。
+> > 单图场景用 `DA3MONO-LARGE`（0.35B，Apache-2.0），备选 `DA3-SMALL`，以及带天空分割的 `DA3ME…
+
+TRIC-LARGE`。
 
 ## 为什么（Why）
 

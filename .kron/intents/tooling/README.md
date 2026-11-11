@@ -1,10 +1,12 @@
 <!-- kron:frontmatter -->
 created_by: '@zhangjun005'
 updated_at: 2026-11-10T12:58:34.7124886Z
+status: active
 <!-- /kron:frontmatter -->
 # tooling：验证工具链（总）
 
-> 所有验证都靠自动截图 + 数值对比，不靠肉眼看窗口。
+> > 所有验证都靠自动截图 + 数值对比，不靠肉眼看窗口。
+
 
 ## 模块边界
 

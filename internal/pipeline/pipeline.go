@@ -1,5 +1,6 @@
 // @kron:intent geometry/sampling/point-count-budget
 // @kron:intent geometry/sampling/resolution-budget
+// @kron:assumes pointcloud-nonmonotonic-tuning
 
 // Package pipeline 把"深度图 + 原图"变成可直接下发浏览器的 ILC1 点云。
 //
