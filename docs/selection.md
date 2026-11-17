@@ -14,7 +14,7 @@
 | # | 铁律 | 原因 |
 |---|---|---|
 | **1** | **只在 conda env 里装东西，绝不碰全局 / base** | 本机 base 是 Python 3.13.5，被 DSH、其他工具共用。污染 = 全线崩 |
-| **2** | **所有缓存与模型都落在 E 盘** | **C 盘只剩 3.9 GB**。pip 默认缓存在 `C:\Users\zj\AppData\Local\pip\Cache`，第一个模型就能塞满 |
+| **2** | **所有缓存与模型都落在 E 盘** | **C 盘只剩 3.9 GB**。pip 默认缓存在 `C:\Users\<用户名>\AppData\Local\pip\Cache`，第一个模型就能塞满 |
 | **3** | **不引用 old 工程代码作为依赖** | `code/` 目录已丢失依赖，仅作参考（见 [archive/legacy-inventory.md](archive/legacy-inventory.md)） |
 
 ---
@@ -53,7 +53,7 @@ conda create -n illust3d python=3.10 -y
 
 ```
 PIP_CACHE_DIR    = E:\cache\pip          # pip 缓存离开 C 盘
-PYTHONNOUSERSITE = 1                     # ★隔离：不读 C:\Users\zj\AppData\Roaming\Python 下的包
+PYTHONNOUSERSITE = 1                     # ★隔离：不读 C:\Users\<用户名>\AppData\Roaming\Python 下的包
 TMP / TEMP / TMPDIR = E:\cache\tmp       # ★临时目录也必须离开 C 盘（见下方踩坑）
 HF_HOME          = E:\models\hf          # HuggingFace 模型与缓存
 HF_ENDPOINT      = https://hf-mirror.com # 国内镜像
@@ -83,7 +83,7 @@ TORCH_HOME       = E:\models\torch       # torch hub 缓存
 > ### 踩坑二：只重定向 `PIP_CACHE_DIR` 不够，`TEMP` 才是大头（2026-11 实测）
 >
 > 第一次装 torch 时只设了 `PIP_CACHE_DIR`，结果 pip 把 2.4 GB 的轮子先解到
-> `C:\Users\zj\AppData\Local\Temp\pip-unpack-*\`，**C 盘从 3.8 GB 被吃到 1.11 GB**，任务被迫中止。
+> `C:\Users\<用户名>\AppData\Local\Temp\pip-unpack-*\`，**C 盘从 3.8 GB 被吃到 1.11 GB**，任务被迫中止。
 >
 > `PIP_CACHE_DIR` 管的是"装完之后留存的缓存"；**下载过程中的临时文件走 `%TEMP%`，是另一条路径**。
 > 现在 `TMP`/`TEMP`/`TMPDIR` 一并指向 `E:\cache\tmp`，并在脚本开头加了 C 盘空间护栏。
@@ -150,7 +150,7 @@ python -c "import sys; print('user-site:', sys.path)"   # 确认没有 AppData\R
 pip -V                                                   # 确认 pip 属于 illust3d
 ```
 
-通过标准：`sys.prefix` 指向 `E:\conda\envs_dirs\illust3d`，`cuda_available=True`，路径里没有 `C:\Users\zj\AppData\Roaming`。
+通过标准：`sys.prefix` 指向 `E:\conda\envs_dirs\illust3d`，`cuda_available=True`，路径里没有 `C:\Users\<用户名>\AppData\Roaming`。
 
 ---
 

@@ -15,8 +15,8 @@ status: active
 两个硬约束：
 
 1. **base 不能动。** 本机 base 是 Python 3.13.5，被 DSH 和其他工具共用。往里装 torch 会让别的工具全线崩。
-2. **C 盘只剩 3.9 GB。** 而 pip 的默认缓存在 `C:\Users\zj\AppData\Local\pip\Cache`，
-   HuggingFace 默认在 `C:\Users\zj\.cache\huggingface`。下载第一个模型就可能把 C 盘塞满。
+2. **C 盘只剩 3.9 GB。** 而 pip 的默认缓存在 `C:\Users\<用户名>\AppData\Local\pip\Cache`，
+   HuggingFace 默认在 `C:\Users\<用户名>\.cache\huggingface`。下载第一个模型就可能把 C 盘塞满。
 
 好消息是 conda 侧已经是对的：`.condarc` 里 `envs_dirs=E:\conda\envs_dirs`、`pkgs_dirs=E:\conda\pkg_dirs`，
 新环境天然落在 E 盘。要补的只有 pip 和 HF 的缓存位置。

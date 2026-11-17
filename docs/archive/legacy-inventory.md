@@ -153,7 +153,7 @@ prediction.processed_images (N,H,W,3)  预处理后的图
 | `pip install -e .` 会拉多少？ | `pyproject.toml` 的 dependencies 含 `trimesh / open3d / pycolmap / evo / e3nn / moviepy / plyfile / gsplat(extras)`，而且 **`api.py` 顶层就 `from depth_anything_3.utils.export import export`**，而 `utils/export/__init__.py` 又顶层 import `gs / colmap / glb / feat_vis / npz` → 只做深度推理也会被拖入整条导出链 | 改**一行**：把 `_export_results()` 里的 `export(...)` 改成函数内 `from depth_anything_3.utils.export import export`。之后只需要 `torch / torchvision / numpy<2 / opencv / pillow / huggingface_hub / safetensors / einops / omegaconf` |
 | Python 版本 | `requires-python = ">=3.9, <=3.13"`，`numpy<2` | 与本机 `3d-build` 环境（py3.10.18 / numpy 1.26.4）匹配 |
 | 别用系统 Python | 系统 python 3.13.5 上是 `torch 2.7.1+cpu`，`cuda_available=False` | 必须走 conda 环境 |
-| 磁盘 | C 盘只剩 **3.8 GB**；HF 缓存默认在 `C:\Users\zj\.cache\huggingface` | 必须 `HF_HOME=E:\models\da3`（E 盘余 109 GB），否则第一个模型下载就把 C 盘塞满 |
+| 磁盘 | C 盘只剩 **3.8 GB**；HF 缓存默认在 `C:\Users\<用户名>\.cache\huggingface` | 必须 `HF_HOME=E:\models\da3`（E 盘余 109 GB），否则第一个模型下载就把 C 盘塞满 |
 | `process_res` | 默认 504，`upper_bound_resize`（长边缩到 504） | 8GB 上先保持 504；要细节就 672 / 756，显存线性涨 |
 
 ---
